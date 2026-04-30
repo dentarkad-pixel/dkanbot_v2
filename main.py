@@ -591,22 +591,45 @@ async def import_and_repost_old_orders():
         save_runtime_state()
     print(f"✅ تم استيراد وإعادة نشر {imported} طلب")
 
-def get_next_order_id(file_name: str = ORDERS_FILE):
-    """احصل على رقم الطلب التالي"""
+def _collect_existing_order_ids(file_name: str = ORDERS_FILE) -> set:
+    ids = set()
     try:
-        if not os.path.exists(file_name):
-            return 1
-        
-        wb = load_workbook(file_name)
-        ws = wb.active
-        ids = []
-        for row in ws.iter_rows(min_row=2, max_col=1):
-            if row[0].value and isinstance(row[0].value, int):
-                ids.append(row[0].value)
-        
+        ids.update(int(k) for k in orders_data.keys())
+    except Exception:
+        pass
+    try:
+        ids.update(int(x) for x in imported_order_ids)
+    except Exception:
+        pass
+
+    def _add_id(value):
+        if isinstance(value, int):
+            ids.add(value)
+        elif isinstance(value, str) and value.strip().isdigit():
+            ids.add(int(value.strip()))
+
+    try:
+        if os.path.exists(file_name):
+            wb = load_workbook(file_name)
+            ws = wb.active
+            # دعم الملفات القديمة التي كانت تضع رقم الطلب في العمود A.
+            for row in ws.iter_rows(min_row=2, min_col=1, max_col=1):
+                _add_id(row[0].value)
+            # التنسيق الحالي يضع رقم الطلب في العمود I.
+            for row in ws.iter_rows(min_row=2, min_col=9, max_col=9):
+                _add_id(row[0].value)
+    except Exception as e:
+        print(f"⚠️ تعذر قراءة أرقام الطلبات من الإكسل: {e}")
+
+    return ids
+
+def get_next_order_id(file_name: str = ORDERS_FILE):
+    """احصل على رقم الطلب التالي بدون تكرار"""
+    try:
+        ids = _collect_existing_order_ids(file_name)
         return max(ids) + 1 if ids else 1
     except Exception as e:
-        print(f"❌ خطأ في قراءة الإكسل: {e}")
+        print(f"❌ خطأ في تحديد رقم الطلب التالي: {e}")
         return 1
 
 def save_to_excel(data, file_name: str = ORDERS_FILE):
