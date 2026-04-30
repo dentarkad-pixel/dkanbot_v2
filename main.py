@@ -1024,12 +1024,8 @@ async def cmd_download(msg: types.Message):
         print(f"❌ خطأ في التحميل: {e}")
         await msg.answer(f"❌ خطأ: {str(e)}")
 
-@dp.message_handler(content_types=types.ContentTypes.TEXT, state='*')
+@dp.message_handler(content_types=types.ContentTypes.TEXT, state=None)
 async def import_forwarded_order(msg: types.Message, state: FSMContext):
-    current_state = await state.get_state()
-    if current_state is not None:
-        return
-
     is_forwarded = any([
         msg.forward_from,
         msg.forward_from_chat,
@@ -1613,4 +1609,4 @@ if __name__ == "__main__":
         await bot.set_my_commands(commands, scope=BotCommandScopeAllPrivateChats())
         await bot.set_my_commands(commands, scope=BotCommandScopeAllGroupChats())
 
-    executor.start_polling(dp, skip_updates=False, on_startup=on_startup)
+    executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
