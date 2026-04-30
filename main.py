@@ -59,28 +59,28 @@ def migrate_legacy_files():
     except Exception as e:
         print(f"⚠️ تعذر نقل الملفات القديمة: {e}")
 
-GROUP_NEW = env_int("GROUP_NEW_ID", -1003735668749)
-GROUP_DESIGN = env_int("GROUP_DESIGN_ID", -1003867470006)
-GROUP_READY = env_int("GROUP_READY_ID", -1003312397488)
-GROUP_SENT = env_int("GROUP_SENT_ID", -1003671523271)
-GROUP_ISSUES = env_int("GROUP_ISSUES_ID", -1003747379674)
+GROUP_NEW = env_int("GROUP_NEW_ID", -1003959320855)
+GROUP_DESIGN = env_int("GROUP_DESIGN_ID", -1003959320855)
+GROUP_READY = env_int("GROUP_READY_ID", -1003959320855)
+GROUP_SENT = env_int("GROUP_SENT_ID", -1003959320855)
+GROUP_ISSUES = env_int("GROUP_ISSUES_ID", -1003959320855)
 
 # Optional hybrid mode:
 # الطلبات الجديدة فقط داخل Topics بكروب واحد (افتراضيا نفس GROUP_NEW).
 # FORUM_GROUP_ID (اختياري) + TOPIC_NEW_*_ID
 FORUM_GROUP_ID = env_int("FORUM_GROUP_ID", GROUP_NEW)
 TOPIC_NEW_ID = env_int("TOPIC_NEW_ID")
-TOPIC_DESIGN_ID = env_int("TOPIC_DESIGN_ID")
-TOPIC_READY_ID = env_int("TOPIC_READY_ID")
-TOPIC_SENT_ID = env_int("TOPIC_SENT_ID")
-TOPIC_ISSUES_ID = env_int("TOPIC_ISSUES_ID")
+TOPIC_DESIGN_ID = env_int("TOPIC_DESIGN_ID", 12)
+TOPIC_READY_ID = env_int("TOPIC_READY_ID", 14)
+TOPIC_SENT_ID = env_int("TOPIC_SENT_ID", 16)
+TOPIC_ISSUES_ID = env_int("TOPIC_ISSUES_ID", 5)
 
 # Default topic IDs from provided topic links in GROUP_NEW
 DEFAULT_TOPIC_IDS = {
-    "new_printing": 61,
-    "new_sport_sets": 59,
-    "new_embroidery": 187,
-    "new_urgent": 192,
+    "new_printing": 3,
+    "new_sport_sets": 3,
+    "new_embroidery": 2,
+    "new_urgent": 9,
 }
 
 CLASSIFIED_TOPIC_IDS = {
@@ -897,8 +897,16 @@ async def route_after_piece_selection(target_message: types.Message, state: FSMC
         await target_message.answer("🧣 صاحب الوشاح؟", reply_markup=get_scarf_owner_kb())
         await OrderState.scarf_owner.set()
         return
-    await target_message.answer("📏 اختر القياس:", reply_markup=get_size_kb())
-    await OrderState.size.set()
+    await _prompt_size_or_price(target_message, state)
+
+async def _prompt_size_or_price(target_message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    if data.get("need_size"):
+        await target_message.answer("📏 اختر القياس:", reply_markup=get_size_kb())
+        await OrderState.size.set()
+    else:
+        await target_message.answer("💰 اكتب سعر الطلب:")
+        await OrderState.price.set()
 
 def get_pieces_kb(selected: list) -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup(row_width=2)
@@ -1179,6 +1187,7 @@ async def process_done_pieces(call: types.CallbackQuery, state: FSMContext):
         need_scarf=need_scarf,
         need_box=need_box,
         need_dist=need_dist,
+        need_size=need_sport or need_over,
         scarf_owner=None if not need_scarf else (data.get("scarf_owner") if data.get("scarf_owner") else None),
         team=None if not need_sport else (data.get("team") if data.get("team") else None),
         sport_number=None if not need_sport else (data.get("sport_number") if data.get("sport_number") else None)
@@ -1212,8 +1221,7 @@ async def process_over_type(call: types.CallbackQuery, state: FSMContext):
         await call.message.answer("🧣 صاحب الوشاح؟", reply_markup=get_scarf_owner_kb())
         await OrderState.scarf_owner.set()
         return
-    await call.message.answer("📏 اختر القياس:", reply_markup=get_size_kb())
-    await OrderState.size.set()
+    await _prompt_size_or_price(call.message, state)
 
 @dp.callback_query_handler(lambda c: c.data.startswith("hand_"), state=OrderState.hand_type)
 async def process_hand_type(call: types.CallbackQuery, state: FSMContext):
@@ -1232,8 +1240,7 @@ async def process_hand_type(call: types.CallbackQuery, state: FSMContext):
         await call.message.answer("🧣 صاحب الوشاح؟", reply_markup=get_scarf_owner_kb())
         await OrderState.scarf_owner.set()
         return
-    await call.message.answer("📏 اختر القياس:", reply_markup=get_size_kb())
-    await OrderState.size.set()
+    await _prompt_size_or_price(call.message, state)
 
 @dp.callback_query_handler(lambda c: c.data.startswith("box_"), state=OrderState.box_color)
 async def process_box_color(call: types.CallbackQuery, state: FSMContext):
@@ -1248,15 +1255,13 @@ async def process_box_color(call: types.CallbackQuery, state: FSMContext):
         await call.message.answer("🧣 صاحب الوشاح؟", reply_markup=get_scarf_owner_kb())
         await OrderState.scarf_owner.set()
         return
-    await call.message.answer("📏 اختر القياس:", reply_markup=get_size_kb())
-    await OrderState.size.set()
+    await _prompt_size_or_price(call.message, state)
 
 @dp.callback_query_handler(lambda c: c.data.startswith("scarf_"), state=OrderState.scarf_owner)
 async def process_scarf_owner(call: types.CallbackQuery, state: FSMContext):
     scarf_owner = call.data.replace("scarf_", "")
     await state.update_data(scarf_owner=scarf_owner)
-    await call.message.answer("📏 اختر القياس:", reply_markup=get_size_kb())
-    await OrderState.size.set()
+    await _prompt_size_or_price(call.message, state)
 
 @dp.message_handler(state=OrderState.dist_count)
 async def process_dist_count(msg: types.Message, state: FSMContext):
@@ -1273,8 +1278,7 @@ async def process_dist_count(msg: types.Message, state: FSMContext):
         await msg.answer("🧣 صاحب الوشاح؟", reply_markup=get_scarf_owner_kb())
         await OrderState.scarf_owner.set()
         return
-    await msg.answer("📏 اختر القياس:", reply_markup=get_size_kb())
-    await OrderState.size.set()
+    await _prompt_size_or_price(msg, state)
 
 @dp.callback_query_handler(lambda c: c.data.startswith("size_"), state=OrderState.size)
 async def process_size(call: types.CallbackQuery, state: FSMContext):
