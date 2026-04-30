@@ -2,6 +2,7 @@ import os
 import re
 import json
 import shutil
+import asyncio
 from aiogram import Bot, Dispatcher, types
 from aiogram.utils import executor
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto, BotCommand, BotCommandScopeAllPrivateChats, BotCommandScopeAllGroupChats
@@ -30,6 +31,10 @@ def env_int(name: str, default=None):
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.getenv("DATA_DIR", BASE_DIR)
 EXCEL_TEMPLATE_PATH = os.getenv("EXCEL_TEMPLATE_PATH", "")
+OLD_DATA_DIR = os.getenv("OLD_DATA_DIR", "")
+OLD_STATE_FILE = os.getenv("OLD_STATE_FILE", "")
+IMPORT_OLD_ON_START = os.getenv("IMPORT_OLD_ON_START", "0").strip().lower() in {"1", "true", "yes"}
+IMPORT_OLD_MODE = os.getenv("IMPORT_OLD_MODE", "new").strip().lower()
 
 ORDERS_FILE = os.path.join(DATA_DIR, "orders.xlsx")
 READY_FILE = os.path.join(DATA_DIR, "orders_ready_current.xlsx")
@@ -159,6 +164,7 @@ bot = Bot(token=API_TOKEN)
 dp = Dispatcher(bot, storage=MemoryStorage())
 orders_data = {}
 message_ids = {}
+imported_order_ids = set()
 
 def _encode_message_ids(ids_map: dict) -> dict:
     encoded = {}
@@ -191,7 +197,8 @@ def save_runtime_state(file_name: str = STATE_FILE):
         ensure_data_dir()
         payload = {
             "orders_data": {str(k): v for k, v in orders_data.items()},
-            "message_ids": _encode_message_ids(message_ids)
+            "message_ids": _encode_message_ids(message_ids),
+            "imported_order_ids": sorted(imported_order_ids)
         }
         with open(file_name, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False)
@@ -199,7 +206,7 @@ def save_runtime_state(file_name: str = STATE_FILE):
         print(f"⚠️ تعذر حفظ حالة البوت: {e}")
 
 def load_runtime_state(file_name: str = STATE_FILE):
-    global orders_data, message_ids
+    global orders_data, message_ids, imported_order_ids
     try:
         ensure_data_dir()
         if not os.path.exists(file_name):
@@ -208,6 +215,7 @@ def load_runtime_state(file_name: str = STATE_FILE):
             payload = json.load(f)
         orders_data = {int(k): v for k, v in payload.get("orders_data", {}).items()}
         message_ids = _decode_message_ids(payload.get("message_ids", {}))
+        imported_order_ids = set(int(x) for x in payload.get("imported_order_ids", []))
         print(f"✅ تم تحميل حالة البوت: {len(orders_data)} طلب")
     except Exception as e:
         print(f"⚠️ تعذر تحميل حالة البوت: {e}")
@@ -376,6 +384,212 @@ def _find_next_order_row(ws) -> int:
 def _coerce_price(value: str) -> int:
     normalized = normalize_price(str(value)) if value is not None else ""
     return int(normalized) if normalized.isdigit() else 0
+
+def _clean_optional(value: str):
+    if value is None:
+        return None
+    cleaned = str(value).strip()
+    if cleaned in {"", "لا يوجد", "لايوجد"}:
+        return None
+    return cleaned
+
+def _parse_order_text(text: str) -> dict:
+    if not text:
+        return {}
+    lines = [line.replace("*", "").strip() for line in text.splitlines()]
+
+    def get_value(label: str) -> str:
+        for line in lines:
+            if label in line:
+                value = line.split(label, 1)[1].replace(":", "").strip()
+                return value
+        return ""
+
+    raw_order_id = get_value("طلب #")
+    old_order_id = int(normalize_digits(raw_order_id)) if raw_order_id.isdigit() else None
+
+    name = get_value("اسم الطفل") or get_value("الاسم")
+    phone = get_value("الهاتف")
+    source = get_value("المصدر") or "غير محدد"
+    area_line = get_value("المحافظة - المنطقة")
+    city = ""
+    area = ""
+    if area_line:
+        parts = re.split(r"\s*-\s*", area_line, maxsplit=1)
+        city = parts[0].strip()
+        if len(parts) > 1:
+            area = parts[1].strip()
+
+    urgent_value = get_value("مستعجل")
+    is_urgent = True if urgent_value.strip() == "نعم" else False
+
+    order_type = get_value("النوع")
+
+    team = _clean_optional(get_value("الفريق"))
+    sport_number = _clean_optional(get_value("الرقم"))
+
+    pieces_line = get_value("القطع")
+    pieces = [p.strip() for p in pieces_line.split(",") if p.strip()] if pieces_line else []
+
+    scarf_owner = _clean_optional(get_value("صاحب الوشاح"))
+    over_type = _clean_optional(get_value("الأوفر"))
+    hand_type = _clean_optional(get_value("الملحف"))
+    box_color = _clean_optional(get_value("لون البوكس"))
+    dist_count = _clean_optional(get_value("عدد التوزيعات"))
+    size = _clean_optional(get_value("القياس"))
+    price_raw = get_value("السعر")
+    price = normalize_price(price_raw)
+
+    notes = ""
+    if "الملاحظات" in "\n".join(lines):
+        start_idx = next((i for i, line in enumerate(lines) if "الملاحظات" in line), None)
+        if start_idx is not None:
+            collected = []
+            for line in lines[start_idx + 1:]:
+                if "━━━━━━━━" in line or "الحالة الحالية" in line:
+                    break
+                collected.append(line)
+            notes = "\n".join([c for c in collected if c]).strip()
+    notes = notes or "لا يوجد"
+
+    return {
+        "old_order_id": old_order_id,
+        "name": name.strip() if name else "",
+        "phone": normalize_phone(phone) if phone else "",
+        "source": source,
+        "city": city,
+        "area": area,
+        "is_urgent": is_urgent,
+        "order_type": order_type,
+        "team": team,
+        "sport_number": sport_number,
+        "pieces": pieces,
+        "scarf_owner": scarf_owner,
+        "over_type": over_type,
+        "hand_type": hand_type,
+        "box_color": box_color,
+        "dist_count": dist_count,
+        "size": size,
+        "price": price,
+        "notes": notes
+    }
+
+async def _import_from_forwarded_message(msg: types.Message):
+    text = msg.text or msg.caption or ""
+    data = _parse_order_text(text)
+
+    if not data.get("name") or not data.get("phone") or not data.get("pieces"):
+        await msg.answer("❌ ما كدرت أقرأ الطلب. تأكد إنك ترسل رسالة الطلب الأصلية كاملة.")
+        return
+
+    order_id = get_next_order_id()
+    data["id"] = order_id
+
+    old_id = data.pop("old_order_id", None)
+    if old_id:
+        extra_note = f"استيراد من طلب #{old_id}"
+        data["notes"] = f"{data.get('notes', '').strip()}\n{extra_note}".strip()
+
+    orders_data[order_id] = {
+        "data": data,
+        "images": [],
+        "current_group": resolve_new_order_status(data)
+    }
+
+    save_to_excel(data, ORDERS_FILE)
+    await _post_order_to_group(order_id, data, [], orders_data[order_id]["current_group"])
+    save_runtime_state()
+
+    await msg.answer(f"✅ تم استيراد الطلب كطلب جديد #{order_id}.")
+
+def _get_old_state_path() -> str:
+    if OLD_STATE_FILE:
+        return OLD_STATE_FILE
+    if OLD_DATA_DIR:
+        return os.path.join(OLD_DATA_DIR, "orders_state.json")
+    return ""
+
+async def _post_order_to_group(order_id: int, data: dict, images_list: list, status: str):
+    text = format_order_text(data, order_id, status)
+    status_kb = get_status_buttons(order_id, status)
+    target = get_target(status)
+    target_key = get_target_key(status)
+    send_kwargs = {}
+    if target["thread_id"]:
+        send_kwargs["message_thread_id"] = target["thread_id"]
+
+    if images_list:
+        media = [InputMediaPhoto(media=i) for i in images_list]
+        msg_group = await bot.send_media_group(chat_id=target["chat_id"], media=media, **send_kwargs)
+        if order_id not in message_ids:
+            message_ids[order_id] = {}
+        if msg_group:
+            message_ids[order_id][target_key] = [m.message_id for m in msg_group]
+
+    msg_text = await bot.send_message(
+        chat_id=target["chat_id"],
+        text=text,
+        reply_markup=status_kb,
+        parse_mode='Markdown',
+        **send_kwargs
+    )
+
+    if order_id not in message_ids:
+        message_ids[order_id] = {}
+    if target_key not in message_ids[order_id]:
+        message_ids[order_id][target_key] = []
+    message_ids[order_id][target_key].append(msg_text.message_id)
+
+async def import_and_repost_old_orders():
+    old_state_path = _get_old_state_path()
+    if not old_state_path or not os.path.exists(old_state_path):
+        print("ℹ️ لا يوجد ملف قديم للاستيراد")
+        return
+
+    try:
+        with open(old_state_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        old_orders = {int(k): v for k, v in payload.get("orders_data", {}).items()}
+    except Exception as e:
+        print(f"⚠️ تعذر قراءة الملف القديم: {e}")
+        return
+
+    if not old_orders:
+        print("ℹ️ لا توجد طلبات قديمة")
+        return
+
+    imported = 0
+    for order_id in sorted(old_orders.keys()):
+        if order_id in imported_order_ids or order_id in orders_data:
+            continue
+
+        order_info = old_orders[order_id]
+        data = order_info.get("data", {})
+        images_list = order_info.get("images", [])
+
+        if not data:
+            continue
+
+        data["id"] = order_id
+        status = resolve_new_order_status(data)
+        if IMPORT_OLD_MODE == "original":
+            status = order_info.get("current_group", status)
+
+        orders_data[order_id] = {
+            "data": data,
+            "images": images_list,
+            "current_group": status
+        }
+
+        save_to_excel(data, ORDERS_FILE)
+        await _post_order_to_group(order_id, data, images_list, status)
+        imported_order_ids.add(order_id)
+        imported += 1
+        await asyncio.sleep(0.3)
+
+    if imported:
+        save_runtime_state()
+    print(f"✅ تم استيراد وإعادة نشر {imported} طلب")
 
 def get_next_order_id(file_name: str = ORDERS_FILE):
     """احصل على رقم الطلب التالي"""
@@ -809,6 +1023,34 @@ async def cmd_download(msg: types.Message):
     except Exception as e:
         print(f"❌ خطأ في التحميل: {e}")
         await msg.answer(f"❌ خطأ: {str(e)}")
+
+@dp.message_handler(content_types=types.ContentTypes.TEXT, state='*')
+async def import_forwarded_order(msg: types.Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state is not None:
+        return
+
+    is_forwarded = any([
+        msg.forward_from,
+        msg.forward_from_chat,
+        msg.forward_sender_name,
+        msg.forward_date
+    ])
+
+    if not is_forwarded:
+        return
+
+    text = msg.text or ""
+    if "طلب #" not in text or "اسم الطفل" not in text:
+        return
+
+    await _import_from_forwarded_message(msg)
+
+@dp.message_handler(commands=['import_old'])
+async def cmd_import_old(msg: types.Message):
+    await msg.answer("⏳ بدء استيراد الطلبات القديمة...")
+    await import_and_repost_old_orders()
+    await msg.answer("✅ تم الانتهاء من الاستيراد.")
 
 @dp.message_handler(state=OrderState.name)
 async def process_name(msg: types.Message, state: FSMContext):
@@ -1358,11 +1600,14 @@ if __name__ == "__main__":
         load_city_code_map()
         init_excel_file(ORDERS_FILE)
         load_runtime_state()
+        if IMPORT_OLD_ON_START:
+            await import_and_repost_old_orders()
         commands = [
             BotCommand("start", "بدء البوت"),
             BotCommand("new", "طلب جديد"),
             BotCommand("cancel", "إلغاء الطلب الحالي"),
-            BotCommand("download", "تحميل طلبات مجهز")
+            BotCommand("download", "تحميل طلبات مجهز"),
+            BotCommand("import_old", "استيراد طلبات قديمة")
         ]
         await bot.set_my_commands(commands)
         await bot.set_my_commands(commands, scope=BotCommandScopeAllPrivateChats())
