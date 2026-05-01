@@ -79,7 +79,7 @@ TOPIC_ISSUES_ID = env_int("TOPIC_ISSUES_ID", 5)
 # Default topic IDs from provided topic links in GROUP_NEW
 DEFAULT_TOPIC_IDS = {
     "new_printing": 3,
-    "new_sport_sets": 174,
+    "new_sport_sets": 74,
     "new_embroidery": 2,
     "new_urgent": 9,
 }
@@ -171,6 +171,7 @@ last_reserved_order_id = None
 forwarded_media_cache = {}
 forwarded_text_cache = {}
 forwarded_photo_cache = {}
+forwarded_last_order = {}
 FORWARDED_TEXT_TTL = 90
 
 def _encode_message_ids(ids_map: dict) -> dict:
@@ -548,6 +549,8 @@ async def _import_from_forwarded_message(msg: types.Message, text_override: str 
     await _post_order_to_group(order_id, data, images_list, orders_data[order_id]["current_group"])
     save_runtime_state()
 
+    _set_forwarded_last_order(msg, order_id)
+
     await msg.answer(f"✅ تم استيراد الطلب كطلب جديد #{order_id}.")
 
 def _get_old_state_path() -> str:
@@ -556,6 +559,43 @@ def _get_old_state_path() -> str:
     if OLD_DATA_DIR:
         return os.path.join(OLD_DATA_DIR, "orders_state.json")
     return ""
+
+def _chunked(items: list, size: int):
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
+
+async def _post_images_to_group(order_id: int, images_list: list, status: str):
+    if not images_list:
+        return
+    target = get_target(status)
+    target_key = get_target_key(status)
+    send_kwargs = {}
+    if target["thread_id"]:
+        send_kwargs["message_thread_id"] = target["thread_id"]
+
+    for chunk in _chunked(images_list, 10):
+        media = [InputMediaPhoto(media=i) for i in chunk]
+        msg_group = await bot.send_media_group(chat_id=target["chat_id"], media=media, **send_kwargs)
+        if order_id not in message_ids:
+            message_ids[order_id] = {}
+        if msg_group:
+            message_ids[order_id].setdefault(target_key, [])
+            message_ids[order_id][target_key].extend([m.message_id for m in msg_group])
+
+async def _attach_images_to_order(order_id: int, images_list: list) -> bool:
+    if not images_list:
+        return False
+    order_info = orders_data.get(order_id)
+    if not order_info:
+        return False
+    existing = order_info.get("images", [])
+    for img in images_list:
+        if img not in existing:
+            existing.append(img)
+    order_info["images"] = existing
+    await _post_images_to_group(order_id, images_list, order_info.get("current_group", "new"))
+    save_runtime_state()
+    return True
 
 async def _post_order_to_group(order_id: int, data: dict, images_list: list, status: str):
     text = format_order_text(data, order_id, status)
@@ -762,6 +802,45 @@ def create_ready_orders_file():
     except Exception as e:
         print(f"❌ خطأ في إنشاء ملف الجاهزة: {e}")
         return None
+
+def rebuild_excel_from_orders(file_name: str = ORDERS_FILE) -> int:
+    """إعادة بناء ملف الإكسل من البيانات الحالية"""
+    try:
+        ensure_data_dir()
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Sheet1"
+        _write_header(ws)
+        _write_city_codes(ws)
+
+        row_idx = 2
+        for order_id in sorted(orders_data.keys()):
+            data = orders_data[order_id].get("data", {})
+            order_row = [
+                data.get("notes", ""),
+                6,
+                "",
+                _excel_phone(data.get("phone", "")),
+                _excel_address(data.get("city", ""), data.get("area", "")),
+                get_city_code(data.get("city")),
+                data.get("name", ""),
+                _coerce_price(data.get("price")),
+                "",
+                "",
+                "",
+                _excel_order_type(data.get("order_type", "")),
+                ""
+            ]
+            for col_idx, value in enumerate(order_row, start=1):
+                ws.cell(row=row_idx, column=col_idx, value=value)
+            row_idx += 1
+
+        wb.save(file_name)
+        print(f"✅ تم إعادة بناء ملف الإكسل: {file_name}")
+        return row_idx - 2
+    except Exception as e:
+        print(f"❌ خطأ في إعادة بناء الإكسل: {e}")
+        return 0
 
 # ================= VALIDATION FUNCTIONS =================
 PERSIAN_ARABIC_DIGITS_MAP = str.maketrans({
@@ -1294,6 +1373,12 @@ async def cmd_download(msg: types.Message):
         print(f"❌ خطأ في التحميل: {e}")
         await msg.answer(f"❌ خطأ: {str(e)}")
 
+@dp.message_handler(commands=['rebuild_excel'])
+async def cmd_rebuild_excel(msg: types.Message):
+    await msg.answer("⏳ إعادة بناء ملف الإكسل...")
+    count = rebuild_excel_from_orders()
+    await msg.answer(f"✅ تم إعادة بناء ملف الإكسل ({count} طلب).")
+
 def _is_forwarded_message(msg: types.Message) -> bool:
     return any([
         msg.forward_from,
@@ -1326,6 +1411,22 @@ def _get_forwarded_text_cache(msg: types.Message, max_age: int = FORWARDED_TEXT_
         forwarded_text_cache.pop(key, None)
         return None
     return payload.get("text")
+
+def _set_forwarded_last_order(msg: types.Message, order_id: int):
+    forwarded_last_order[_forward_cache_key(msg)] = {
+        "order_id": order_id,
+        "ts": time.time()
+    }
+
+def _get_forwarded_last_order(msg: types.Message, max_age: int = FORWARDED_TEXT_TTL):
+    key = _forward_cache_key(msg)
+    payload = forwarded_last_order.get(key)
+    if not payload:
+        return None
+    if time.time() - payload.get("ts", 0) > max_age:
+        forwarded_last_order.pop(key, None)
+        return None
+    return payload.get("order_id")
 
 def _cache_forwarded_photo(msg: types.Message, file_id: str):
     key = _forward_cache_key(msg)
@@ -1383,14 +1484,17 @@ async def import_forwarded_order_photo(msg: types.Message, state: FSMContext):
             "caption": "",
             "processing": False,
             "last_ts": time.time(),
-            "owner_key": _forward_cache_key(msg)
+            "owner_key": _forward_cache_key(msg),
+            "caption_from_cache": False
         })
         group["owner_key"] = group.get("owner_key") or _forward_cache_key(msg)
         group["photos"].append(msg.photo[-1].file_id)
         if caption and _looks_like_order_text(caption):
             group["caption"] = caption
+            group["caption_from_cache"] = False
         elif cached_text and not group.get("caption"):
             group["caption"] = cached_text
+            group["caption_from_cache"] = True
         group["last_ts"] = time.time()
 
         if group["caption"] and not group["processing"]:
@@ -1401,7 +1505,12 @@ async def import_forwarded_order_photo(msg: types.Message, state: FSMContext):
                 return
             photos = group.get("photos", [])
             caption = group.get("caption", "")
+            caption_from_cache = group.get("caption_from_cache")
             del forwarded_media_cache[msg.media_group_id]
+            if caption_from_cache:
+                order_id = _get_forwarded_last_order(msg)
+                if order_id and await _attach_images_to_order(order_id, photos):
+                    return
             await _import_from_forwarded_message(msg, text_override=caption, images_list=photos)
         return
 
@@ -1410,6 +1519,9 @@ async def import_forwarded_order_photo(msg: types.Message, state: FSMContext):
         return
 
     if cached_text:
+        order_id = _get_forwarded_last_order(msg)
+        if order_id and await _attach_images_to_order(order_id, [msg.photo[-1].file_id]):
+            return
         await _import_from_forwarded_message(msg, text_override=cached_text, images_list=[msg.photo[-1].file_id])
         return
 
@@ -2067,7 +2179,8 @@ if __name__ == "__main__":
             BotCommand("new", "طلب جديد"),
             BotCommand("cancel", "إلغاء الطلب الحالي"),
             BotCommand("download", "تحميل طلبات مجهز"),
-            BotCommand("import_old", "استيراد طلبات قديمة")
+            BotCommand("import_old", "استيراد طلبات قديمة"),
+            BotCommand("rebuild_excel", "إعادة بناء ملف الإكسل")
         ]
         await bot.set_my_commands(commands)
         await bot.set_my_commands(commands, scope=BotCommandScopeAllPrivateChats())
