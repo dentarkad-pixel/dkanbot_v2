@@ -3,6 +3,7 @@ import re
 import json
 import shutil
 import asyncio
+import time
 from aiogram import Bot, Dispatcher, types
 from aiogram.utils import executor
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto, BotCommand, BotCommandScopeAllPrivateChats, BotCommandScopeAllGroupChats
@@ -78,7 +79,7 @@ TOPIC_ISSUES_ID = env_int("TOPIC_ISSUES_ID", 5)
 # Default topic IDs from provided topic links in GROUP_NEW
 DEFAULT_TOPIC_IDS = {
     "new_printing": 3,
-    "new_sport_sets": 3,
+    "new_sport_sets": 174,
     "new_embroidery": 2,
     "new_urgent": 9,
 }
@@ -142,12 +143,12 @@ def resolve_new_order_status(data: dict) -> str:
     if data.get("is_urgent"):
         return "new_urgent"
 
+    if data.get("order_type") == "تطريز":
+        return "new_embroidery"
+
     pieces = data.get("pieces", [])
     if len(pieces) == 1 and pieces[0] == "سيت رياضي":
         return "new_sport_sets"
-
-    if data.get("order_type") == "تطريز":
-        return "new_embroidery"
 
     return "new_printing"
 
@@ -165,6 +166,9 @@ dp = Dispatcher(bot, storage=MemoryStorage())
 orders_data = {}
 message_ids = {}
 imported_order_ids = set()
+order_id_lock = asyncio.Lock()
+last_reserved_order_id = None
+forwarded_media_cache = {}
 
 def _encode_message_ids(ids_map: dict) -> dict:
     encoded = {}
@@ -240,12 +244,18 @@ class OrderState(StatesGroup):
     team = State()
     team_other = State()
     sport_number = State()
+    sport_weight = State()
     pieces = State()
     over_type = State()
     hand_type = State()
+    shafa_color = State()
     scarf_owner = State()
     box_color = State()
+    box_wood_name = State()
+    dist_type = State()
     dist_count = State()
+    dist_color = State()
+    supplies_type = State()
     size = State()
     price = State()
     notes = State()
@@ -333,11 +343,8 @@ def _write_header(ws):
         ws.cell(row=1, column=col_idx, value=value)
 
 def _write_city_codes(ws):
-    row_idx = 2
-    for city, code in CITY_CODE_MAP_DEFAULT_RAW:
-        ws.cell(row=row_idx, column=16, value=city)
-        ws.cell(row=row_idx, column=17, value=code)
-        row_idx += 1
+    # تم إيقاف كتابة مفاتيح المحافظات داخل ملف الإكسل.
+    return
 
 def load_city_code_map():
     """تحميل رموز المحافظات من القالب (أعمدة P/Q)"""
@@ -385,6 +392,24 @@ def _coerce_price(value: str) -> int:
     normalized = normalize_price(str(value)) if value is not None else ""
     return int(normalized) if normalized.isdigit() else 0
 
+def _excel_phone(phone: str) -> str:
+    normalized = normalize_phone(phone or "")
+    if normalized.startswith("0"):
+        return normalized[1:]
+    return normalized
+
+def _excel_address(city: str, area: str) -> str:
+    area_clean = str(area).strip() if area else ""
+    if area_clean:
+        return area_clean
+    city_clean = str(city).strip() if city else ""
+    return city_clean
+
+def _excel_order_type(order_type: str) -> str:
+    if order_type == "طباعة":
+        return "طباعى"
+    return order_type or ""
+
 def _clean_optional(value: str):
     if value is None:
         return None
@@ -427,15 +452,26 @@ def _parse_order_text(text: str) -> dict:
 
     team = _clean_optional(get_value("الفريق"))
     sport_number = _clean_optional(get_value("الرقم"))
+    sport_weight = _clean_optional(get_value("وزن الطفل"))
 
     pieces_line = get_value("القطع")
     pieces = [p.strip() for p in pieces_line.split(",") if p.strip()] if pieces_line else []
 
     scarf_owner = _clean_optional(get_value("صاحب الوشاح"))
+    shafa_color = _clean_optional(get_value("لون الشفقة"))
     over_type = _clean_optional(get_value("الأوفر"))
     hand_type = _clean_optional(get_value("الملحف"))
     box_color = _clean_optional(get_value("لون البوكس"))
+    box_wood_name = _clean_optional(get_value("اسم الخشب"))
+    dist_type_raw = _clean_optional(get_value("التوزيعات"))
+    dist_type = dist_type_raw
+    dist_types = []
+    if dist_type_raw:
+        parts = re.split(r"[،,]+", str(dist_type_raw))
+        dist_types = [p.strip() for p in parts if p.strip()]
     dist_count = _clean_optional(get_value("عدد التوزيعات"))
+    dist_color = _clean_optional(get_value("لون التوزيعات"))
+    supplies_type = _clean_optional(get_value("المستلزمات"))
     size = _clean_optional(get_value("القياس"))
     price_raw = get_value("السعر")
     price = normalize_price(price_raw)
@@ -463,26 +499,34 @@ def _parse_order_text(text: str) -> dict:
         "order_type": order_type,
         "team": team,
         "sport_number": sport_number,
+        "sport_weight": sport_weight,
         "pieces": pieces,
         "scarf_owner": scarf_owner,
+        "shafa_color": shafa_color,
         "over_type": over_type,
         "hand_type": hand_type,
         "box_color": box_color,
+        "box_wood_name": box_wood_name,
+        "dist_type": dist_type,
+        "dist_types": dist_types,
+        "dist_details": {},
         "dist_count": dist_count,
+        "dist_color": dist_color,
+        "supplies_type": supplies_type,
         "size": size,
         "price": price,
         "notes": notes
     }
 
-async def _import_from_forwarded_message(msg: types.Message):
-    text = msg.text or msg.caption or ""
+async def _import_from_forwarded_message(msg: types.Message, text_override: str = None, images_list: list = None):
+    text = text_override if text_override is not None else (msg.text or msg.caption or "")
     data = _parse_order_text(text)
 
     if not data.get("name") or not data.get("phone") or not data.get("pieces"):
         await msg.answer("❌ ما كدرت أقرأ الطلب. تأكد إنك ترسل رسالة الطلب الأصلية كاملة.")
         return
 
-    order_id = get_next_order_id()
+    order_id = await reserve_next_order_id()
     data["id"] = order_id
 
     old_id = data.pop("old_order_id", None)
@@ -490,14 +534,15 @@ async def _import_from_forwarded_message(msg: types.Message):
         extra_note = f"استيراد من طلب #{old_id}"
         data["notes"] = f"{data.get('notes', '').strip()}\n{extra_note}".strip()
 
+    images_list = images_list or []
     orders_data[order_id] = {
         "data": data,
-        "images": [],
+        "images": images_list,
         "current_group": resolve_new_order_status(data)
     }
 
     save_to_excel(data, ORDERS_FILE)
-    await _post_order_to_group(order_id, data, [], orders_data[order_id]["current_group"])
+    await _post_order_to_group(order_id, data, images_list, orders_data[order_id]["current_group"])
     save_runtime_state()
 
     await msg.answer(f"✅ تم استيراد الطلب كطلب جديد #{order_id}.")
@@ -632,6 +677,15 @@ def get_next_order_id(file_name: str = ORDERS_FILE):
         print(f"❌ خطأ في تحديد رقم الطلب التالي: {e}")
         return 1
 
+async def reserve_next_order_id(file_name: str = ORDERS_FILE) -> int:
+    global last_reserved_order_id
+    async with order_id_lock:
+        if last_reserved_order_id is None:
+            ids = _collect_existing_order_ids(file_name)
+            last_reserved_order_id = max(ids) if ids else 0
+        last_reserved_order_id += 1
+        return last_reserved_order_id
+
 def save_to_excel(data, file_name: str = ORDERS_FILE):
     """احفظ الطلب في ملف Excel"""
     try:
@@ -639,21 +693,20 @@ def save_to_excel(data, file_name: str = ORDERS_FILE):
         wb = load_workbook(file_name)
         ws = wb.active
 
-        pieces = data.get("pieces", [])
         order_row = [
             data.get("notes", ""),
-            len(pieces),
-            "لا",
-            data.get("phone", ""),
-            f"{data.get('city', '')} - {data.get('area', '')}".strip(" -"),
+            6,
+            "",
+            _excel_phone(data.get("phone", "")),
+            _excel_address(data.get("city", ""), data.get("area", "")),
             get_city_code(data.get("city")),
             data.get("name", ""),
             _coerce_price(data.get("price")),
-            data.get("id"),
             "",
             "",
-            data.get("order_type", ""),
-            ", ".join(pieces)
+            "",
+            _excel_order_type(data.get("order_type", "")),
+            ""
         ]
 
         target_row = _find_next_order_row(ws)
@@ -679,21 +732,20 @@ def create_ready_orders_file():
         for order_id, order_info in orders_data.items():
             if order_info.get("current_group") == "ready":
                 data = order_info.get("data", {})
-                pieces = data.get("pieces", [])
                 order_row = [
                     data.get("notes", ""),
-                    len(pieces),
-                    "لا",
-                    data.get("phone", ""),
-                    f"{data.get('city', '')} - {data.get('area', '')}".strip(" -"),
+                    6,
+                    "",
+                    _excel_phone(data.get("phone", "")),
+                    _excel_address(data.get("city", ""), data.get("area", "")),
                     get_city_code(data.get("city")),
                     data.get("name", ""),
                     _coerce_price(data.get("price")),
-                    order_id,
                     "",
                     "",
-                    data.get("order_type", ""),
-                    ", ".join(pieces)
+                    "",
+                    _excel_order_type(data.get("order_type", "")),
+                    ""
                 ]
 
                 target_row = _find_next_order_row(ws)
@@ -782,10 +834,18 @@ def get_status_buttons(order_id: int, current_group: str = "new") -> InlineKeybo
     return kb
 
 def format_order_text(data: dict, order_id: int, current_group: str = "new") -> str:
-    over = data.get("over_type", "لا يوجد")
-    hand = data.get("hand_type", "لا يوجد")
-    box = data.get("box_color", "لا يوجد")
-    dist = data.get("dist_count", "لا يوجد")
+    over = data.get("over_type")
+    hand = data.get("hand_type")
+    box = data.get("box_color")
+    box_wood_name = data.get("box_wood_name")
+    dist_type = data.get("dist_type")
+    dist = data.get("dist_count")
+    dist_color = data.get("dist_color")
+    dist_types = data.get("dist_types") or ([] if not dist_type else [dist_type])
+    dist_details = data.get("dist_details", {})
+    shafa_color = data.get("shafa_color")
+    supplies_type = data.get("supplies_type")
+    sport_weight = data.get("sport_weight")
     source = data.get("source", "غير محدد")
     group_display = STATUS_DISPLAY_NAMES.get(current_group, "غير معروف")
     urgent_text = "نعم" if data.get("is_urgent") else "لا"
@@ -798,10 +858,72 @@ def format_order_text(data: dict, order_id: int, current_group: str = "new") -> 
         sport_line += f"\n⚽ *الفريق:* {team}"
     if sport_number:
         sport_line += f"\n🔢 *الرقم:* {sport_number}"
+    if sport_weight:
+        sport_line += f"\n⚖️ *وزن الطفل:* {sport_weight}"
 
     scarf_line = ""
     if scarf_owner:
         scarf_line = f"\n🧣 *صاحب الوشاح:* {scarf_owner}"
+
+    shafa_line = ""
+    if shafa_color:
+        shafa_line = f"\n🌈 *لون الشفقة:* {shafa_color}"
+
+    supplies_line = ""
+    if supplies_type:
+        supplies_line = f"\n🧰 *المستلزمات:* {supplies_type}"
+
+    dist_type_line = ""
+    if dist_types:
+        dist_items = []
+        for item in dist_types:
+            if not item:
+                continue
+            details = dist_details.get(item, {})
+            parts = []
+            if details.get("dist_count"):
+                parts.append(f"عدد: {details['dist_count']}")
+            if details.get("dist_color"):
+                parts.append(f"لون: {details['dist_color']}")
+            if details.get("box_color"):
+                parts.append(f"لون البوكس: {details['box_color']}")
+            if details.get("box_wood_name"):
+                parts.append(f"اسم الخشب: {details['box_wood_name']}")
+            if parts:
+                dist_items.append(f"{item} ({'، '.join(parts)})")
+            else:
+                dist_items.append(item)
+        if dist_items:
+            dist_type_line = f"\n🎉 *التوزيعات:* {', '.join(dist_items)}"
+    else:
+        if dist_type:
+            dist_type_line = f"\n🎉 *التوزيعات:* {dist_type}"
+
+    dist_count_line = ""
+    dist_color_line = ""
+    box_line = ""
+    box_wood_line = ""
+    if not dist_types:
+        if dist:
+            dist_count_line = f"\n🔢 *عدد التوزيعات:* {dist}"
+        if dist_color:
+            dist_color_line = f"\n🎨 *لون التوزيعات:* {dist_color}"
+        if box:
+            box_line = f"\n🎁 *لون البوكس:* {box}"
+        if box_wood_name:
+            box_wood_line = f"\n🪵 *اسم الخشب:* {box_wood_name}"
+
+    over_line = ""
+    if over:
+        over_line = f"\n👗 *الأوفر:* {over}"
+
+    hand_line = ""
+    if hand:
+        hand_line = f"\n🛏 *الملحف:* {hand}"
+
+    size_line = ""
+    if data.get("size"):
+        size_line = f"\n📏 *القياس:* {data.get('size', '')}"
 
     text = f"""📦 *طلب #{order_id}*
 
@@ -813,16 +935,10 @@ def format_order_text(data: dict, order_id: int, current_group: str = "new") -> 
 
 🧵 *النوع:* {data['order_type']}
 {sport_line}
-👕 *القطع:* {', '.join(data['pieces'])}
-{scarf_line}
-
-👗 *الأوفر:* {over}
-🛏 *الملحف:* {hand}
-🎁 *لون البوكس:* {box}
-🎉 *عدد التوزيعات:* {dist}
-
-📏 *القياس:* {data['size']}
-💰 *السعر:* {data['price']} دينار عراقي
+👕 *القطع:* {', '.join(data.get('pieces', []))}
+{scarf_line}{shafa_line}{supplies_line}{dist_type_line}{dist_count_line}{dist_color_line}{box_line}{box_wood_line}
+{over_line}{hand_line}{size_line}
+💰 *السعر:* {data.get('price', '')} دينار عراقي
 
 📝 *الملاحظات:*
 {data['notes']}
@@ -884,7 +1000,7 @@ def get_urgent_kb() -> InlineKeyboardMarkup:
     )
     return kb
 
-teams_list = ["برشلونة", "ريال مدريد", "بايرن", "مانشستر يونايتد", "مانشستر سيتي", "تشيلسي", "ليفربول", "باريس سان جيرمان", "يوفنتوس", "أرسنال"]
+teams_list = ["برشلونة", "ريال مدريد", "العراق"]
 
 def get_teams_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup(row_width=2)
@@ -894,31 +1010,56 @@ def get_teams_kb() -> InlineKeyboardMarkup:
     return kb
 
 pieces_list = [
-    "سيت 3", "سيت 6", "سيت رياضي", "أوفر", "كلو", "صدرية", 
-    "حضينة وكماط", "ملحف", "شفقات", "وشاح", "بوكس ككو", "توزيعات"
+    "سيت6",
+    "سيت3",
+    "سيت رياضي",
+    "أوفر",
+    "ملحف",
+    "كلو",
+    "صدرية",
+    "كماط وحضينة",
+    "عش",
+    "شفقة",
+    "كفوف",
+    "جواريب",
+    "وشاح",
+    "وشاح استقبال",
+    "ارنوب",
+    "قطع خاصة",
+    "مستلزمات",
+    "توزيعات"
 ]
 
 async def route_after_piece_selection(target_message: types.Message, state: FSMContext):
     data = await state.get_data()
-    if data.get("need_over"):
+    if data.get("need_over") and not data.get("over_type"):
         await target_message.answer("✨ نوع الأوفر:", reply_markup=get_over_type_kb())
         await OrderState.over_type.set()
         return
-    if data.get("need_hand"):
+    if data.get("need_hand") and not data.get("hand_type"):
         await target_message.answer("🛏 نوع الملحف:", reply_markup=get_hand_type_kb())
         await OrderState.hand_type.set()
         return
-    if data.get("need_box"):
-        await target_message.answer("🎁 اختر لون البوكس:", reply_markup=get_box_color_kb())
-        await OrderState.box_color.set()
+    if data.get("need_shafa") and not data.get("shafa_color"):
+        await target_message.answer("🎨 اكتب لون الشفقة:")
+        await OrderState.shafa_color.set()
         return
     if data.get("need_dist"):
-        await target_message.answer("🎉 اكتب عدد التوزيعات:")
-        await OrderState.dist_count.set()
-        return
-    if data.get("need_scarf"):
+        dist_types = data.get("dist_types", [])
+        if not dist_types:
+            await target_message.answer("🎉 اختر نوع التوزيعات:", reply_markup=get_dist_type_select_kb([]))
+            await OrderState.dist_type.set()
+            return
+        asked = await _ask_next_dist_detail(target_message, state)
+        if asked:
+            return
+    if data.get("need_scarf") and not data.get("scarf_owner"):
         await target_message.answer("🧣 صاحب الوشاح؟", reply_markup=get_scarf_owner_kb())
         await OrderState.scarf_owner.set()
+        return
+    if data.get("need_supplies") and not data.get("supplies_type"):
+        await target_message.answer("🧰 اختر نوع المستلزمات:", reply_markup=get_supplies_kb())
+        await OrderState.supplies_type.set()
         return
     await _prompt_size_or_price(target_message, state)
 
@@ -960,8 +1101,8 @@ def get_hand_type_kb() -> InlineKeyboardMarkup:
 def get_scarf_owner_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup(row_width=2)
     kb.add(
-        InlineKeyboardButton("👦 ولد", callback_data="scarf_ولد"),
-        InlineKeyboardButton("👧 بنية", callback_data="scarf_بنية")
+        InlineKeyboardButton("👦 ولادي", callback_data="scarf_ولادي"),
+        InlineKeyboardButton("👧 بناتي", callback_data="scarf_بناتي")
     )
     return kb
 
@@ -974,6 +1115,101 @@ def get_box_color_kb() -> InlineKeyboardMarkup:
         InlineKeyboardButton("🩵 سماوي", callback_data="box_سماوي")
     )
     return kb
+
+def get_dist_type_select_kb(selected: list) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardMarkup(row_width=2)
+    options = [
+        "بوكس ككو",
+        "توزيعات شمع",
+        "ستاند طبشور",
+        "ستاند girl",
+        "ستاند boy",
+        "التاريخ خشب",
+        "صينية DR",
+        "صينية DB",
+        "توزيعات DM",
+        "توزيعات DVF",
+        "توزيعات DVS",
+        "توزيعات DTF",
+        "توزيعات DTS",
+        "توزيعات DK",
+        "توزيعات DC",
+        "توزيعات DF",
+        "توزيعات DS",
+        "توزيعات D3",
+        "توزيعات خاصة"
+    ]
+    for opt in options:
+        mark = "✅" if opt in selected else "☐"
+        kb.insert(InlineKeyboardButton(f"{mark} {opt}", callback_data=f"dist_{opt}"))
+    kb.add(InlineKeyboardButton("✔️ تم", callback_data="dist_done"))
+    return kb
+
+def get_supplies_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardMarkup(row_width=2)
+    options = [
+        "تعلاكة",
+        "سيت مشوطة",
+        "حاملة لهاية",
+        "ممية",
+        "ترمز",
+        "حافظة حليب",
+        "سيت عناية"
+    ]
+    for opt in options:
+        kb.insert(InlineKeyboardButton(opt, callback_data=f"supply_{opt}"))
+    return kb
+
+DIST_BOX_TYPES = {"بوكس ككو"}
+DIST_COLOR_TYPES = {"توزيعات شمع"}
+DIST_COUNT_TYPES = {
+    "توزيعات DM",
+    "توزيعات DVF",
+    "توزيعات DVS",
+    "توزيعات DTF",
+    "توزيعات DTS",
+    "توزيعات DK",
+    "توزيعات DC",
+    "توزيعات DF",
+    "توزيعات DS",
+    "توزيعات D3",
+    "توزيعات خاصة"
+}
+
+def _dist_required_steps(dist_type: str) -> list:
+    steps = []
+    if dist_type in DIST_BOX_TYPES:
+        steps.extend(["box_color", "box_wood_name"])
+    if dist_type in DIST_COLOR_TYPES:
+        steps.extend(["dist_count", "dist_color"])
+    elif dist_type in DIST_COUNT_TYPES:
+        steps.append("dist_count")
+    return steps
+
+async def _ask_next_dist_detail(target_message: types.Message, state: FSMContext) -> bool:
+    data = await state.get_data()
+    dist_types = data.get("dist_types", [])
+    dist_details = data.get("dist_details", {})
+    for dist_type in dist_types:
+        details = dist_details.get(dist_type, {})
+        for step in _dist_required_steps(dist_type):
+            if not details.get(step):
+                await state.update_data(dist_active_type=dist_type, dist_active_step=step)
+                if step == "box_color":
+                    await target_message.answer("🎁 اختر لون البوكس:", reply_markup=get_box_color_kb())
+                    await OrderState.box_color.set()
+                elif step == "box_wood_name":
+                    await target_message.answer("🪵 اكتب اسم الخشب:")
+                    await OrderState.box_wood_name.set()
+                elif step == "dist_count":
+                    await target_message.answer("🎉 اكتب عدد التوزيعات:")
+                    await OrderState.dist_count.set()
+                elif step == "dist_color":
+                    await target_message.answer("🎨 اكتب لون التوزيعات:")
+                    await OrderState.dist_color.set()
+                return True
+    await state.update_data(dist_active_type=None, dist_active_step=None)
+    return False
 
 sizes = ["حديثي ولادة", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"]
 
@@ -1055,23 +1291,60 @@ async def cmd_download(msg: types.Message):
         print(f"❌ خطأ في التحميل: {e}")
         await msg.answer(f"❌ خطأ: {str(e)}")
 
-@dp.message_handler(content_types=types.ContentTypes.TEXT, state=None)
-async def import_forwarded_order(msg: types.Message, state: FSMContext):
-    is_forwarded = any([
+def _is_forwarded_message(msg: types.Message) -> bool:
+    return any([
         msg.forward_from,
         msg.forward_from_chat,
         msg.forward_sender_name,
         msg.forward_date
     ])
 
-    if not is_forwarded:
+def _looks_like_order_text(text: str) -> bool:
+    return "طلب #" in text and "اسم الطفل" in text
+
+@dp.message_handler(content_types=types.ContentTypes.TEXT, state=None)
+async def import_forwarded_order(msg: types.Message, state: FSMContext):
+    if not _is_forwarded_message(msg):
         return
 
     text = msg.text or ""
-    if "طلب #" not in text or "اسم الطفل" not in text:
+    if not _looks_like_order_text(text):
         return
 
-    await _import_from_forwarded_message(msg)
+    await _import_from_forwarded_message(msg, text_override=text, images_list=[])
+
+@dp.message_handler(content_types=types.ContentTypes.PHOTO, state=None)
+async def import_forwarded_order_photo(msg: types.Message, state: FSMContext):
+    if not _is_forwarded_message(msg):
+        return
+
+    caption = msg.caption or ""
+    if msg.media_group_id:
+        group = forwarded_media_cache.setdefault(msg.media_group_id, {
+            "photos": [],
+            "caption": "",
+            "processing": False,
+            "last_ts": time.time()
+        })
+        group["photos"].append(msg.photo[-1].file_id)
+        if caption and _looks_like_order_text(caption):
+            group["caption"] = caption
+        group["last_ts"] = time.time()
+
+        if group["caption"] and not group["processing"]:
+            group["processing"] = True
+            await asyncio.sleep(0.8)
+            group = forwarded_media_cache.get(msg.media_group_id)
+            if not group or not group.get("caption"):
+                return
+            photos = group.get("photos", [])
+            caption = group.get("caption", "")
+            del forwarded_media_cache[msg.media_group_id]
+            await _import_from_forwarded_message(msg, text_override=caption, images_list=photos)
+        return
+
+    if caption and _looks_like_order_text(caption):
+        await _import_from_forwarded_message(msg, text_override=caption, images_list=[msg.photo[-1].file_id])
 
 @dp.message_handler(commands=['import_old'])
 async def cmd_import_old(msg: types.Message):
@@ -1142,7 +1415,27 @@ async def process_order_type(call: types.CallbackQuery, state: FSMContext):
     await state.update_data(order_type=order_type)
 
     await call.message.edit_text("👕 اختر القطع:", reply_markup=get_pieces_kb([]))
-    await state.update_data(pieces=[], team=None, sport_number=None)
+    await state.update_data(
+        pieces=[],
+        team=None,
+        sport_number=None,
+        sport_weight=None,
+        over_type=None,
+        hand_type=None,
+        shafa_color=None,
+        scarf_owner=None,
+        box_color=None,
+        box_wood_name=None,
+        dist_type=None,
+        dist_types=[],
+        dist_details={},
+        dist_active_type=None,
+        dist_active_step=None,
+        dist_count=None,
+        dist_color=None,
+        supplies_type=None,
+        size=None
+    )
     await OrderState.pieces.set()
 
 @dp.callback_query_handler(lambda c: c.data.startswith("team_"), state=OrderState.team)
@@ -1176,6 +1469,16 @@ async def process_sport_number(msg: types.Message, state: FSMContext):
         return
 
     await state.update_data(sport_number=sport_number)
+    await msg.answer("⚖️ اكتب وزن الطفل:")
+    await OrderState.sport_weight.set()
+
+@dp.message_handler(state=OrderState.sport_weight)
+async def process_sport_weight(msg: types.Message, state: FSMContext):
+    weight = msg.text.strip()
+    if len(weight) < 1:
+        await msg.answer("❌ اكتب وزن الطفل:")
+        return
+    await state.update_data(sport_weight=weight)
     await route_after_piece_selection(msg, state)
 
 @dp.callback_query_handler(lambda c: c.data.startswith("piece_"), state=OrderState.pieces)
@@ -1198,22 +1501,40 @@ async def process_done_pieces(call: types.CallbackQuery, state: FSMContext):
         await call.answer("❌ اختر قطعة واحدة على الأقل!", show_alert=True)
         return
     need_sport = "سيت رياضي" in pieces
-    need_over = any(p in pieces for p in ["أوفر", "سيت 3", "سيت 6"])
-    need_hand = any(p in pieces for p in ["ملحف", "سيت 6"])
+    need_over = any(p in pieces for p in ["أوفر", "سيت3", "سيت6"])
+    need_hand = any(p in pieces for p in ["ملحف", "سيت6"])
     need_scarf = "وشاح" in pieces
-    need_box = "بوكس ككو" in pieces
+    need_shafa = "شفقة" in pieces
     need_dist = "توزيعات" in pieces
+    need_supplies = "مستلزمات" in pieces
     await state.update_data(
         need_sport=need_sport,
         need_over=need_over,
         need_hand=need_hand,
         need_scarf=need_scarf,
-        need_box=need_box,
+        need_shafa=need_shafa,
         need_dist=need_dist,
+        need_supplies=need_supplies,
+        need_box=False,
+        need_box_wood=False,
+        need_dist_count=False,
+        need_dist_color=False,
         need_size=need_sport or need_over,
         scarf_owner=None if not need_scarf else (data.get("scarf_owner") if data.get("scarf_owner") else None),
+        shafa_color=None if not need_shafa else (data.get("shafa_color") if data.get("shafa_color") else None),
         team=None if not need_sport else (data.get("team") if data.get("team") else None),
-        sport_number=None if not need_sport else (data.get("sport_number") if data.get("sport_number") else None)
+        sport_number=None if not need_sport else (data.get("sport_number") if data.get("sport_number") else None),
+        sport_weight=None if not need_sport else (data.get("sport_weight") if data.get("sport_weight") else None),
+        dist_type=None,
+        dist_types=[] if not need_dist else (data.get("dist_types") if data.get("dist_types") else []),
+        dist_details={} if not need_dist else (data.get("dist_details") if data.get("dist_details") else {}),
+        dist_active_type=None,
+        dist_active_step=None,
+        dist_count=None,
+        dist_color=None,
+        box_color=None,
+        box_wood_name=None,
+        supplies_type=None if not need_supplies else (data.get("supplies_type") if data.get("supplies_type") else None)
     )
 
     if need_sport:
@@ -1227,64 +1548,106 @@ async def process_done_pieces(call: types.CallbackQuery, state: FSMContext):
 async def process_over_type(call: types.CallbackQuery, state: FSMContext):
     over_choice = call.data.replace("over_", "")
     await state.update_data(over_type=over_choice)
-    data = await state.get_data()
-    if data.get("need_hand"):
-        await call.message.answer("🛏 نوع الملحف:", reply_markup=get_hand_type_kb())
-        await OrderState.hand_type.set()
-        return
-    if data.get("need_box"):
-        await call.message.answer("🎁 اختر لون البوكس:", reply_markup=get_box_color_kb())
-        await OrderState.box_color.set()
-        return
-    if data.get("need_dist"):
-        await call.message.answer("🎉 اكتب عدد التوزيعات:")
-        await OrderState.dist_count.set()
-        return
-    if data.get("need_scarf"):
-        await call.message.answer("🧣 صاحب الوشاح؟", reply_markup=get_scarf_owner_kb())
-        await OrderState.scarf_owner.set()
-        return
-    await _prompt_size_or_price(call.message, state)
+    await route_after_piece_selection(call.message, state)
 
 @dp.callback_query_handler(lambda c: c.data.startswith("hand_"), state=OrderState.hand_type)
 async def process_hand_type(call: types.CallbackQuery, state: FSMContext):
     hand_choice = call.data.replace("hand_", "")
     await state.update_data(hand_type=hand_choice)
-    data = await state.get_data()
-    if data.get("need_box"):
-        await call.message.answer("🎁 اختر لون البوكس:", reply_markup=get_box_color_kb())
-        await OrderState.box_color.set()
-        return
-    if data.get("need_dist"):
-        await call.message.answer("🎉 اكتب عدد التوزيعات:")
-        await OrderState.dist_count.set()
-        return
-    if data.get("need_scarf"):
-        await call.message.answer("🧣 صاحب الوشاح؟", reply_markup=get_scarf_owner_kb())
-        await OrderState.scarf_owner.set()
-        return
-    await _prompt_size_or_price(call.message, state)
+    await route_after_piece_selection(call.message, state)
 
 @dp.callback_query_handler(lambda c: c.data.startswith("box_"), state=OrderState.box_color)
 async def process_box_color(call: types.CallbackQuery, state: FSMContext):
     box_color = call.data.replace("box_", "")
     await state.update_data(box_color=box_color)
     data = await state.get_data()
-    if data.get("need_dist"):
-        await call.message.answer("🎉 اكتب عدد التوزيعات:")
-        await OrderState.dist_count.set()
-        return
-    if data.get("need_scarf"):
-        await call.message.answer("🧣 صاحب الوشاح؟", reply_markup=get_scarf_owner_kb())
-        await OrderState.scarf_owner.set()
-        return
-    await _prompt_size_or_price(call.message, state)
+    dist_type = data.get("dist_active_type")
+    if dist_type:
+        dist_details = data.get("dist_details", {})
+        details = dist_details.get(dist_type, {})
+        details["box_color"] = box_color
+        dist_details[dist_type] = details
+        await state.update_data(dist_details=dist_details)
+    await route_after_piece_selection(call.message, state)
 
 @dp.callback_query_handler(lambda c: c.data.startswith("scarf_"), state=OrderState.scarf_owner)
 async def process_scarf_owner(call: types.CallbackQuery, state: FSMContext):
     scarf_owner = call.data.replace("scarf_", "")
     await state.update_data(scarf_owner=scarf_owner)
-    await _prompt_size_or_price(call.message, state)
+    await route_after_piece_selection(call.message, state)
+
+@dp.message_handler(state=OrderState.shafa_color)
+async def process_shafa_color(msg: types.Message, state: FSMContext):
+    color = msg.text.strip()
+    if len(color) < 1:
+        await msg.answer("❌ اكتب لون الشفقة:")
+        return
+    await state.update_data(shafa_color=color)
+    await route_after_piece_selection(msg, state)
+
+@dp.callback_query_handler(lambda c: c.data.startswith("dist_"), state=OrderState.dist_type)
+async def process_dist_type(call: types.CallbackQuery, state: FSMContext):
+    dist_type = call.data.replace("dist_", "")
+    data = await state.get_data()
+    selected = data.get("dist_types", [])
+    if dist_type in selected:
+        selected.remove(dist_type)
+    else:
+        selected.append(dist_type)
+    await state.update_data(dist_types=selected)
+    await call.message.edit_reply_markup(reply_markup=get_dist_type_select_kb(selected))
+    await call.answer()
+
+@dp.callback_query_handler(lambda c: c.data == "dist_done", state=OrderState.dist_type)
+async def process_dist_done(call: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    selected = data.get("dist_types", [])
+    if not selected:
+        await call.answer("❌ اختر نوع واحد على الأقل!", show_alert=True)
+        return
+    await call.answer()
+    await route_after_piece_selection(call.message, state)
+
+@dp.message_handler(state=OrderState.box_wood_name)
+async def process_box_wood_name(msg: types.Message, state: FSMContext):
+    name = msg.text.strip()
+    if len(name) < 1:
+        await msg.answer("❌ اكتب اسم الخشب:")
+        return
+    await state.update_data(box_wood_name=name)
+    data = await state.get_data()
+    dist_type = data.get("dist_active_type")
+    if dist_type:
+        dist_details = data.get("dist_details", {})
+        details = dist_details.get(dist_type, {})
+        details["box_wood_name"] = name
+        dist_details[dist_type] = details
+        await state.update_data(dist_details=dist_details)
+    await route_after_piece_selection(msg, state)
+
+@dp.message_handler(state=OrderState.dist_color)
+async def process_dist_color(msg: types.Message, state: FSMContext):
+    color = msg.text.strip()
+    if len(color) < 1:
+        await msg.answer("❌ اكتب لون التوزيعات:")
+        return
+    await state.update_data(dist_color=color)
+    data = await state.get_data()
+    dist_type = data.get("dist_active_type")
+    if dist_type:
+        dist_details = data.get("dist_details", {})
+        details = dist_details.get(dist_type, {})
+        details["dist_color"] = color
+        dist_details[dist_type] = details
+        await state.update_data(dist_details=dist_details)
+    await route_after_piece_selection(msg, state)
+
+@dp.callback_query_handler(lambda c: c.data.startswith("supply_"), state=OrderState.supplies_type)
+async def process_supplies_type(call: types.CallbackQuery, state: FSMContext):
+    supply = call.data.replace("supply_", "")
+    await state.update_data(supplies_type=supply)
+    await call.answer()
+    await route_after_piece_selection(call.message, state)
 
 @dp.message_handler(state=OrderState.dist_count)
 async def process_dist_count(msg: types.Message, state: FSMContext):
@@ -1297,11 +1660,14 @@ async def process_dist_count(msg: types.Message, state: FSMContext):
         return
     await state.update_data(dist_count=count)
     data = await state.get_data()
-    if data.get("need_scarf"):
-        await msg.answer("🧣 صاحب الوشاح؟", reply_markup=get_scarf_owner_kb())
-        await OrderState.scarf_owner.set()
-        return
-    await _prompt_size_or_price(msg, state)
+    dist_type = data.get("dist_active_type")
+    if dist_type:
+        dist_details = data.get("dist_details", {})
+        details = dist_details.get(dist_type, {})
+        details["dist_count"] = count
+        dist_details[dist_type] = details
+        await state.update_data(dist_details=dist_details)
+    await route_after_piece_selection(msg, state)
 
 @dp.callback_query_handler(lambda c: c.data.startswith("size_"), state=OrderState.size)
 async def process_size(call: types.CallbackQuery, state: FSMContext):
@@ -1347,8 +1713,10 @@ async def finish_order(msg: types.Message, state: FSMContext):
         return
     
     try:
-        order_id = get_next_order_id()
+        order_id = await reserve_next_order_id()
         data = await state.get_data()
+        data.pop("dist_active_type", None)
+        data.pop("dist_active_step", None)
         images_list = data.get("images", [])
 
         data["id"] = order_id
