@@ -170,6 +170,7 @@ order_id_lock = asyncio.Lock()
 last_reserved_order_id = None
 forwarded_media_cache = {}
 forwarded_text_cache = {}
+forwarded_photo_cache = {}
 FORWARDED_TEXT_TTL = 90
 
 def _encode_message_ids(ids_map: dict) -> dict:
@@ -1326,6 +1327,36 @@ def _get_forwarded_text_cache(msg: types.Message, max_age: int = FORWARDED_TEXT_
         return None
     return payload.get("text")
 
+def _cache_forwarded_photo(msg: types.Message, file_id: str):
+    key = _forward_cache_key(msg)
+    payload = forwarded_photo_cache.setdefault(key, {"photos": [], "ts": time.time()})
+    payload["photos"].append(file_id)
+    payload["ts"] = time.time()
+
+def _collect_pending_forwarded_images(msg: types.Message, max_age: int = FORWARDED_TEXT_TTL) -> list:
+    key = _forward_cache_key(msg)
+    images = []
+
+    payload = forwarded_photo_cache.get(key)
+    if payload:
+        if time.time() - payload.get("ts", 0) <= max_age:
+            images.extend(payload.get("photos", []))
+        forwarded_photo_cache.pop(key, None)
+
+    stale_group_ids = []
+    for group_id, group in forwarded_media_cache.items():
+        if group.get("owner_key") != key:
+            continue
+        if group.get("caption"):
+            continue
+        if time.time() - group.get("last_ts", 0) <= max_age:
+            images.extend(group.get("photos", []))
+        stale_group_ids.append(group_id)
+    for group_id in stale_group_ids:
+        forwarded_media_cache.pop(group_id, None)
+
+    return images
+
 @dp.message_handler(content_types=types.ContentTypes.TEXT, state=None)
 async def import_forwarded_order(msg: types.Message, state: FSMContext):
     if not _is_forwarded_message(msg):
@@ -1336,7 +1367,8 @@ async def import_forwarded_order(msg: types.Message, state: FSMContext):
         return
 
     _set_forwarded_text_cache(msg, text)
-    await _import_from_forwarded_message(msg, text_override=text, images_list=[])
+    pending_images = _collect_pending_forwarded_images(msg)
+    await _import_from_forwarded_message(msg, text_override=text, images_list=pending_images)
 
 @dp.message_handler(content_types=types.ContentTypes.PHOTO, state=None)
 async def import_forwarded_order_photo(msg: types.Message, state: FSMContext):
@@ -1350,8 +1382,10 @@ async def import_forwarded_order_photo(msg: types.Message, state: FSMContext):
             "photos": [],
             "caption": "",
             "processing": False,
-            "last_ts": time.time()
+            "last_ts": time.time(),
+            "owner_key": _forward_cache_key(msg)
         })
+        group["owner_key"] = group.get("owner_key") or _forward_cache_key(msg)
         group["photos"].append(msg.photo[-1].file_id)
         if caption and _looks_like_order_text(caption):
             group["caption"] = caption
@@ -1377,6 +1411,9 @@ async def import_forwarded_order_photo(msg: types.Message, state: FSMContext):
 
     if cached_text:
         await _import_from_forwarded_message(msg, text_override=cached_text, images_list=[msg.photo[-1].file_id])
+        return
+
+    _cache_forwarded_photo(msg, msg.photo[-1].file_id)
 
 @dp.message_handler(commands=['import_old'])
 async def cmd_import_old(msg: types.Message):
