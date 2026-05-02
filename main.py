@@ -919,6 +919,8 @@ def format_order_text(data: dict, order_id: int, current_group: str = "new") -> 
 
     scarf_line = f"\n🧣 *صاحب الوشاح:* {data.get('scarf_owner')}" if data.get("scarf_owner") else ""
     shafa_line = f"\n🌈 *لون الشفقة:* {data.get('shafa_color')}" if data.get("shafa_color") else ""
+    over_line = f"\n✨ *نوع الأوفر:* {data.get('over_type')}" if data.get("over_type") else ""
+    hand_line = f"\n🛏 *نوع الملحف:* {data.get('hand_type')}" if data.get("hand_type") else ""
     supplies_line = f"\n🧰 *المستلزمات:* {data.get('supplies_type')}" if data.get("supplies_type") else ""
 
     dist_types = data.get("dist_types") or ([] if not data.get("dist_type") else [data.get("dist_type")])
@@ -954,7 +956,7 @@ def format_order_text(data: dict, order_id: int, current_group: str = "new") -> 
 🧵 *النوع:* {data.get('order_type', '')}
 {sport_line}
 👕 *القطع:* {', '.join(data.get('pieces', []))}
-{scarf_line}{shafa_line}{supplies_line}{dist_type_line}{size_line}
+{over_line}{hand_line}{scarf_line}{shafa_line}{supplies_line}{dist_type_line}{size_line}
 💰 *السعر:* {data.get('price', '')} دينار عراقي
 
 📝 *الملاحظات:*
@@ -1070,6 +1072,10 @@ async def route_after_piece_selection(target_message: types.Message, state: FSMC
         await target_message.answer("🎨 اكتب لون الشفقة:")
         await OrderState.shafa_color.set()
         return
+    if data.get("need_scarf") and not data.get("scarf_owner"):
+        await target_message.answer("🧣 صاحب الوشاح؟", reply_markup=get_scarf_owner_kb())
+        await OrderState.scarf_owner.set()
+        return
     if data.get("need_dist"):
         dist_types = data.get("dist_types", [])
         if not dist_types:
@@ -1079,10 +1085,6 @@ async def route_after_piece_selection(target_message: types.Message, state: FSMC
         asked = await _ask_next_dist_detail(target_message, state)
         if asked:
             return
-    if data.get("need_scarf") and not data.get("scarf_owner"):
-        await target_message.answer("🧣 صاحب الوشاح؟", reply_markup=get_scarf_owner_kb())
-        await OrderState.scarf_owner.set()
-        return
     if data.get("need_supplies") and not data.get("supplies_type"):
         supplies_types = data.get("supplies_types", [])
         if not supplies_types:
@@ -1793,7 +1795,7 @@ async def process_shafa_color(msg: types.Message, state: FSMContext):
     await state.update_data(shafa_color=color)
     await route_after_piece_selection(msg, state)
 
-@dp.callback_query_handler(lambda c: c.data.startswith("dist_"), state=OrderState.dist_type)
+@dp.callback_query_handler(lambda c: c.data.startswith("dist_") and c.data != "dist_done", state=OrderState.dist_type)
 async def process_dist_type(call: types.CallbackQuery, state: FSMContext):
     dist_type = call.data.replace("dist_", "")
     data = await state.get_data()
