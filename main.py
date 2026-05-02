@@ -988,6 +988,15 @@ cities_list = [
     "العمارة - ميسان"
 ]
 
+sources_list = [
+    "تيليجرام",
+    "انستغرام",
+    "واتساب",
+    "فيسبوك",
+    "معرض",
+    "اخرى"
+]
+
 def get_cities_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup(row_width=2)
     for city in cities_list:
@@ -1243,6 +1252,11 @@ def get_size_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup(row_width=4)
     for s in sizes:
         kb.insert(InlineKeyboardButton(s, callback_data=f"size_{s}"))
+    return kb
+
+def get_done_images_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardMarkup(row_width=1)
+    kb.add(InlineKeyboardButton("✅ تم", callback_data="done_images"))
     return kb
 
 def get_edit_options_kb(order_id: int) -> InlineKeyboardMarkup:
@@ -1901,7 +1915,7 @@ async def process_price(msg: types.Message, state: FSMContext):
 async def process_notes(msg: types.Message, state: FSMContext):
     notes = "لا يوجد" if msg.text.strip().lower() in ["لا", "لايوجد"] else msg.text.strip()
     await state.update_data(notes=notes)
-    await msg.answer("📸 ارسل الصور (1-8) أو اكتب 'تم':")
+    await msg.answer("📸 ارسل الصور (1-8) أو اكتب 'تم':", reply_markup=get_done_images_kb())
     await state.update_data(images=[])
     await OrderState.images.set()
 
@@ -1914,14 +1928,26 @@ async def process_photo(msg: types.Message, state: FSMContext):
         return
     images.append(msg.photo[-1].file_id)
     await state.update_data(images=images)
-    await msg.answer(f"✅ صورة ({len(images)}/8)")
+    await msg.answer(f"✅ صورة ({len(images)}/8)", reply_markup=get_done_images_kb())
+
+    caption = (msg.caption or "").strip().lower()
+    if "تم" in caption:
+        await _finalize_order(msg, state)
+
+@dp.callback_query_handler(lambda c: c.data == "done_images", state=OrderState.images)
+async def finish_order_from_button(call: types.CallbackQuery, state: FSMContext):
+    await call.answer()
+    await _finalize_order(call.message, state)
 
 @dp.message_handler(state=OrderState.images)
 async def finish_order(msg: types.Message, state: FSMContext):
-    if "تم" not in msg.text.lower():
+    if not msg.text or "تم" not in msg.text.lower():
         await msg.answer("❌ اكتب 'تم' أو أرسل صورة:")
         return
-    
+
+    await _finalize_order(msg, state)
+
+async def _finalize_order(msg: types.Message, state: FSMContext):
     try:
         order_id = await reserve_next_order_id()
         data = await state.get_data()
@@ -1956,21 +1982,21 @@ async def finish_order(msg: types.Message, state: FSMContext):
                 message_ids[order_id] = {}
             if msg_group:
                 message_ids[order_id][target_key] = [m.message_id for m in msg_group]
-        
+
         msg_text = await bot.send_message(
-            chat_id=target["chat_id"], 
-            text=text, 
-            reply_markup=status_kb, 
+            chat_id=target["chat_id"],
+            text=text,
+            reply_markup=status_kb,
             parse_mode='Markdown',
             **send_kwargs
         )
-        
+
         if order_id not in message_ids:
             message_ids[order_id] = {}
         if target_key not in message_ids[order_id]:
             message_ids[order_id][target_key] = []
         message_ids[order_id][target_key].append(msg_text.message_id)
-        
+
         await msg.answer(f"✅ طلب #{order_id} تم!")
     except Exception as e:
         print(f"❌ خطأ: {e}")
