@@ -260,6 +260,7 @@ class OrderState(StatesGroup):
     dist_count = State()
     dist_color = State()
     supplies_type = State()
+    supplies_types = State()
     size = State()
     price = State()
     notes = State()
@@ -284,11 +285,7 @@ EXCEL_HEADER_ROW = [
     "كود الشحنة",
     "هاتف المستلم 2\n",
     "نوع البضاعة",
-    "وصف البضاعة المسترجعة اوالمستبدلة",
-    None,
-    None,
-    None,
-    "مفاتيح المحافظات"
+    "وصف البضاعة المسترجعة اوالمستبدلة"
 ]
 
 CITY_CODE_MAP_DEFAULT_RAW = [
@@ -304,7 +301,6 @@ CITY_CODE_MAP_DEFAULT_RAW = [
     ("اربيل", "ARB"),
     ("كركوك", "KRK"),
     ("السليمانية", "SMH"),
-    ("السليمانيه", "SMH"),
     ("صلاح الدين", "SAH"),
     ("الانبار", "ANB"),
     ("السماوة المثنى", "SAM"),
@@ -323,7 +319,6 @@ def init_excel_file(file_name: str = ORDERS_FILE):
             ws = wb.active
             ws.title = "Sheet1"
             _write_header(ws)
-            _write_city_codes(ws)
             wb.save(file_name)
             print(f"✅ تم إنشاء الملف: {file_name}")
         else:
@@ -374,15 +369,8 @@ def get_city_code(city_name: str) -> str:
     return CITY_CODE_MAP.get(key, "")
 
 def _find_next_order_row(ws) -> int:
-    last_mapping_row = 1
-    for row_idx in range(2, ws.max_row + 1):
-        if ws.cell(row=row_idx, column=16).value or ws.cell(row=row_idx, column=17).value:
-            last_mapping_row = row_idx
-
-    start_row = max(2, last_mapping_row + 1)
+    start_row = 2
     for row_idx in range(start_row, ws.max_row + 1):
-        if ws.cell(row=row_idx, column=16).value or ws.cell(row=row_idx, column=17).value:
-            continue
         has_data = False
         for col_idx in range(1, 14):
             if ws.cell(row=row_idx, column=col_idx).value not in (None, ""):
@@ -770,7 +758,6 @@ def create_ready_orders_file():
         ws = wb.active
         ws.title = "Sheet1"
         _write_header(ws)
-        _write_city_codes(ws)
         
         for order_id, order_info in orders_data.items():
             if order_info.get("current_group") == "ready":
@@ -811,7 +798,6 @@ def rebuild_excel_from_orders(file_name: str = ORDERS_FILE) -> int:
         ws = wb.active
         ws.title = "Sheet1"
         _write_header(ws)
-        _write_city_codes(ws)
 
         row_idx = 2
         for order_id in sorted(orders_data.keys()):
@@ -1139,10 +1125,12 @@ async def route_after_piece_selection(target_message: types.Message, state: FSMC
         await target_message.answer("🧣 صاحب الوشاح؟", reply_markup=get_scarf_owner_kb())
         await OrderState.scarf_owner.set()
         return
-    if data.get("need_supplies") and not data.get("supplies_type"):
-        await target_message.answer("🧰 اختر نوع المستلزمات:", reply_markup=get_supplies_kb())
-        await OrderState.supplies_type.set()
-        return
+    if data.get("need_supplies"):
+        supplies_types = data.get("supplies_types", [])
+        if not supplies_types:
+            await target_message.answer("🧰 اختر نوع المستلزمات:", reply_markup=get_supplies_kb([]))
+            await OrderState.supplies_types.set()
+            return
     await _prompt_size_or_price(target_message, state)
 
 async def _prompt_size_or_price(target_message: types.Message, state: FSMContext):
@@ -1203,6 +1191,7 @@ def get_dist_type_select_kb(selected: list) -> InlineKeyboardMarkup:
     options = [
         "بوكس ككو",
         "توزيعات شمع",
+        "اسم خشب",
         "ستاند طبشور",
         "ستاند girl",
         "ستاند boy",
@@ -1227,8 +1216,9 @@ def get_dist_type_select_kb(selected: list) -> InlineKeyboardMarkup:
     kb.add(InlineKeyboardButton("✔️ تم", callback_data="dist_done"))
     return kb
 
-def get_supplies_kb() -> InlineKeyboardMarkup:
+def get_supplies_kb(selected: list = None) -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup(row_width=2)
+    selected = selected or []
     options = [
         "تعلاكة",
         "سيت مشوطة",
@@ -1239,11 +1229,14 @@ def get_supplies_kb() -> InlineKeyboardMarkup:
         "سيت عناية"
     ]
     for opt in options:
-        kb.insert(InlineKeyboardButton(opt, callback_data=f"supply_{opt}"))
+        mark = "✅" if opt in selected else "☐"
+        kb.insert(InlineKeyboardButton(f"{mark} {opt}", callback_data=f"supply_{opt}"))
+    kb.add(InlineKeyboardButton("✔️ تم", callback_data="supply_done"))
     return kb
 
 DIST_BOX_TYPES = {"بوكس ككو"}
 DIST_COLOR_TYPES = {"توزيعات شمع"}
+DIST_WOOD_TYPES = {"اسم خشب"}
 DIST_COUNT_TYPES = {
     "توزيعات DM",
     "توزيعات DVF",
@@ -1260,7 +1253,9 @@ DIST_COUNT_TYPES = {
 
 def _dist_required_steps(dist_type: str) -> list:
     steps = []
-    if dist_type in DIST_BOX_TYPES:
+    if dist_type in DIST_WOOD_TYPES:
+        steps.append("box_wood_name")
+    elif dist_type in DIST_BOX_TYPES:
         steps.extend(["box_color", "box_wood_name"])
     if dist_type in DIST_COLOR_TYPES:
         steps.extend(["dist_count", "dist_color"])
@@ -1615,6 +1610,7 @@ async def process_order_type(call: types.CallbackQuery, state: FSMContext):
         dist_count=None,
         dist_color=None,
         supplies_type=None,
+        supplies_types=[],
         size=None
     )
     await OrderState.pieces.set()
@@ -1823,12 +1819,28 @@ async def process_dist_color(msg: types.Message, state: FSMContext):
         await state.update_data(dist_details=dist_details)
     await route_after_piece_selection(msg, state)
 
-@dp.callback_query_handler(lambda c: c.data.startswith("supply_"), state=OrderState.supplies_type)
+@dp.callback_query_handler(lambda c: c.data.startswith("supply_"), state=OrderState.supplies_types)
 async def process_supplies_type(call: types.CallbackQuery, state: FSMContext):
     supply = call.data.replace("supply_", "")
-    await state.update_data(supplies_type=supply)
+    if supply == "done":
+        data = await state.get_data()
+        if not data.get("supplies_types"):
+            await call.answer("❌ اختر نوع واحد على الأقل!", show_alert=True)
+            return
+        await state.update_data(supplies_type=", ".join(data.get("supplies_types", [])))
+        await call.answer()
+        await route_after_piece_selection(call.message, state)
+        return
+
+    data = await state.get_data()
+    selected = data.get("supplies_types", [])
+    if supply in selected:
+        selected.remove(supply)
+    else:
+        selected.append(supply)
+    await state.update_data(supplies_types=selected)
+    await call.message.edit_reply_markup(reply_markup=get_supplies_kb(selected))
     await call.answer()
-    await route_after_piece_selection(call.message, state)
 
 @dp.message_handler(state=OrderState.dist_count)
 async def process_dist_count(msg: types.Message, state: FSMContext):
@@ -1872,7 +1884,7 @@ async def process_price(msg: types.Message, state: FSMContext):
 async def process_notes(msg: types.Message, state: FSMContext):
     notes = "لا يوجد" if msg.text.strip().lower() in ["لا", "لايوجد"] else msg.text.strip()
     await state.update_data(notes=notes)
-    await msg.answer("📸 ارسل الصور (1-4) أو اكتب 'تم':")
+    await msg.answer("📸 ارسل الصور (1-8) أو اكتب 'تم':")
     await state.update_data(images=[])
     await OrderState.images.set()
 
@@ -1880,12 +1892,12 @@ async def process_notes(msg: types.Message, state: FSMContext):
 async def process_photo(msg: types.Message, state: FSMContext):
     data = await state.get_data()
     images = data.get("images", [])
-    if len(images) >= 4:
-        await msg.answer("❌ الحد الأقصى 4 صور!")
+    if len(images) >= 8:
+        await msg.answer("❌ الحد الأقصى 8 صور!")
         return
     images.append(msg.photo[-1].file_id)
     await state.update_data(images=images)
-    await msg.answer(f"✅ صورة ({len(images)}/4)")
+    await msg.answer(f"✅ صورة ({len(images)}/8)")
 
 @dp.message_handler(state=OrderState.images)
 async def finish_order(msg: types.Message, state: FSMContext):
