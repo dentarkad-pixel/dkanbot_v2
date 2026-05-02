@@ -228,15 +228,7 @@ def load_runtime_state(file_name: str = STATE_FILE):
     except Exception as e:
         print(f"⚠️ تعذر تحميل حالة البوت: {e}")
 
-# ================= مصادر الطلب =================
-sources_list = [
-    "دكان",
-    "أمير وأميرة",
-    "واتساب",
-    "تيك توك"
-]
-
-# ================= STATES =================
+# ================= ORDER STATES =================
 class OrderState(StatesGroup):
     name = State()
     phone = State()
@@ -244,6 +236,7 @@ class OrderState(StatesGroup):
     city = State()
     area = State()
     urgent = State()
+    urgent_note = State()
     order_type = State()
     team = State()
     team_other = State()
@@ -724,8 +717,10 @@ def save_to_excel(data, file_name: str = ORDERS_FILE):
         wb = load_workbook(file_name)
         ws = wb.active
 
+        notes_field = data.get("notes", "")
+
         order_row = [
-            data.get("notes", ""),
+            notes_field,
             6,
             "",
             _excel_phone(data.get("phone", "")),
@@ -762,8 +757,10 @@ def create_ready_orders_file():
         for order_id, order_info in orders_data.items():
             if order_info.get("current_group") == "ready":
                 data = order_info.get("data", {})
+                notes_field = data.get("notes", "")
+
                 order_row = [
-                    data.get("notes", ""),
+                    notes_field,
                     6,
                     "",
                     _excel_phone(data.get("phone", "")),
@@ -802,15 +799,17 @@ def rebuild_excel_from_orders(file_name: str = ORDERS_FILE) -> int:
         row_idx = 2
         for order_id in sorted(orders_data.keys()):
             data = orders_data[order_id].get("data", {})
+            notes_field = data.get("notes", "")
+
             order_row = [
-                data.get("notes", ""),
+                notes_field,
                 6,
                 "",
                 _excel_phone(data.get("phone", "")),
                 _excel_address(data.get("city", ""), data.get("area", "")),
                 get_city_code(data.get("city")),
                 data.get("name", ""),
-                _coerce_price(data.get("price")),
+                _coerce_price(data.get("price", "")),
                 "",
                 "",
                 "",
@@ -902,25 +901,14 @@ def get_status_buttons(order_id: int, current_group: str = "new") -> InlineKeybo
     return kb
 
 def format_order_text(data: dict, order_id: int, current_group: str = "new") -> str:
-    over = data.get("over_type")
-    hand = data.get("hand_type")
-    box = data.get("box_color")
-    box_wood_name = data.get("box_wood_name")
-    dist_type = data.get("dist_type")
-    dist = data.get("dist_count")
-    dist_color = data.get("dist_color")
-    dist_types = data.get("dist_types") or ([] if not dist_type else [dist_type])
-    dist_details = data.get("dist_details", {})
-    shafa_color = data.get("shafa_color")
-    supplies_type = data.get("supplies_type")
-    sport_weight = data.get("sport_weight")
     source = data.get("source", "غير محدد")
     group_display = STATUS_DISPLAY_NAMES.get(current_group, "غير معروف")
     urgent_text = "نعم" if data.get("is_urgent") else "لا"
-    scarf_owner = data.get("scarf_owner")
+    urgent_note_text = data.get("urgent_note") or ""
+
     team = data.get("team")
     sport_number = data.get("sport_number")
-
+    sport_weight = data.get("sport_weight")
     sport_line = ""
     if team:
         sport_line += f"\n⚽ *الفريق:* {team}"
@@ -929,87 +917,48 @@ def format_order_text(data: dict, order_id: int, current_group: str = "new") -> 
     if sport_weight:
         sport_line += f"\n⚖️ *وزن الطفل:* {sport_weight}"
 
-    scarf_line = ""
-    if scarf_owner:
-        scarf_line = f"\n🧣 *صاحب الوشاح:* {scarf_owner}"
+    scarf_line = f"\n🧣 *صاحب الوشاح:* {data.get('scarf_owner')}" if data.get("scarf_owner") else ""
+    shafa_line = f"\n🌈 *لون الشفقة:* {data.get('shafa_color')}" if data.get("shafa_color") else ""
+    supplies_line = f"\n🧰 *المستلزمات:* {data.get('supplies_type')}" if data.get("supplies_type") else ""
 
-    shafa_line = ""
-    if shafa_color:
-        shafa_line = f"\n🌈 *لون الشفقة:* {shafa_color}"
+    dist_types = data.get("dist_types") or ([] if not data.get("dist_type") else [data.get("dist_type")])
+    dist_details = data.get("dist_details", {})
+    dist_items = []
+    for item in dist_types:
+        if not item:
+            continue
+        details = dist_details.get(item, {})
+        parts = []
+        if details.get("dist_count"):
+            parts.append(f"عدد: {details['dist_count']}")
+        if details.get("dist_color"):
+            parts.append(f"لون: {details['dist_color']}")
+        if details.get("box_color"):
+            parts.append(f"لون البوكس: {details['box_color']}")
+        if details.get("box_wood_name"):
+            parts.append(f"اسم الخشب: {details['box_wood_name']}")
+        dist_items.append(f"{item} ({'، '.join(parts)})" if parts else item)
+    dist_type_line = f"\n🎉 *التوزيعات:* {', '.join(dist_items)}" if dist_items else ""
 
-    supplies_line = ""
-    if supplies_type:
-        supplies_line = f"\n🧰 *المستلزمات:* {supplies_type}"
-
-    dist_type_line = ""
-    if dist_types:
-        dist_items = []
-        for item in dist_types:
-            if not item:
-                continue
-            details = dist_details.get(item, {})
-            parts = []
-            if details.get("dist_count"):
-                parts.append(f"عدد: {details['dist_count']}")
-            if details.get("dist_color"):
-                parts.append(f"لون: {details['dist_color']}")
-            if details.get("box_color"):
-                parts.append(f"لون البوكس: {details['box_color']}")
-            if details.get("box_wood_name"):
-                parts.append(f"اسم الخشب: {details['box_wood_name']}")
-            if parts:
-                dist_items.append(f"{item} ({'، '.join(parts)})")
-            else:
-                dist_items.append(item)
-        if dist_items:
-            dist_type_line = f"\n🎉 *التوزيعات:* {', '.join(dist_items)}"
-    else:
-        if dist_type:
-            dist_type_line = f"\n🎉 *التوزيعات:* {dist_type}"
-
-    dist_count_line = ""
-    dist_color_line = ""
-    box_line = ""
-    box_wood_line = ""
-    if not dist_types:
-        if dist:
-            dist_count_line = f"\n🔢 *عدد التوزيعات:* {dist}"
-        if dist_color:
-            dist_color_line = f"\n🎨 *لون التوزيعات:* {dist_color}"
-        if box:
-            box_line = f"\n🎁 *لون البوكس:* {box}"
-        if box_wood_name:
-            box_wood_line = f"\n🪵 *اسم الخشب:* {box_wood_name}"
-
-    over_line = ""
-    if over:
-        over_line = f"\n👗 *الأوفر:* {over}"
-
-    hand_line = ""
-    if hand:
-        hand_line = f"\n🛏 *الملحف:* {hand}"
-
-    size_line = ""
-    if data.get("size"):
-        size_line = f"\n📏 *القياس:* {data.get('size', '')}"
+    size_line = f"\n📏 *القياس:* {data.get('size', '')}" if data.get("size") else ""
+    urgent_note_line = f"\n🛎️ *ملاحظة المستعجل:* {urgent_note_text}" if urgent_note_text else ""
 
     text = f"""📦 *طلب #{order_id}*
 
-👤 *اسم الطفل:* {data['name']}
-📞 *الهاتف:* {data['phone']}
+👤 *اسم الطفل:* {data.get('name', '')}
+📞 *الهاتف:* {data.get('phone', '')}
 📱 *المصدر:* {source}
-📍 *المحافظة - المنطقة:* {data['city']} - {data['area']}
-⏰ *مستعجل:* {urgent_text}
+📍 *المحافظة - المنطقة:* {data.get('city', '')} - {data.get('area', '')}
+⏰ *مستعجل:* {urgent_text}{urgent_note_line}
 
-🧵 *النوع:* {data['order_type']}
+🧵 *النوع:* {data.get('order_type', '')}
 {sport_line}
 👕 *القطع:* {', '.join(data.get('pieces', []))}
-{scarf_line}{shafa_line}{supplies_line}{dist_type_line}{dist_count_line}{dist_color_line}{box_line}{box_wood_line}
-{over_line}{hand_line}{size_line}
+{scarf_line}{shafa_line}{supplies_line}{dist_type_line}{size_line}
 💰 *السعر:* {data.get('price', '')} دينار عراقي
 
 📝 *الملاحظات:*
-{data['notes']}
+{data.get('notes', '')}
 
 ━━━━━━━━━━━━━━━━━━
 📍 *الحالة الحالية:* {group_display}
@@ -1577,8 +1526,24 @@ async def process_area(msg: types.Message, state: FSMContext):
 async def process_urgent(call: types.CallbackQuery, state: FSMContext):
     is_urgent = call.data == "urgent_yes"
     await state.update_data(is_urgent=is_urgent)
-    await call.message.answer("🧵 اختر نوع الطلب:", reply_markup=get_order_type_kb())
     await call.answer()
+    if is_urgent:
+        await call.message.answer("📝 اكتب ملاحظة المستعجل (اختياري)، أو اكتب 'لا' لتخطي:")
+        await OrderState.urgent_note.set()
+    else:
+        await call.message.answer("🧵 اختر نوع الطلب:", reply_markup=get_order_type_kb())
+        await OrderState.order_type.set()
+
+
+@dp.message_handler(state=OrderState.urgent_note)
+async def process_urgent_note(msg: types.Message, state: FSMContext):
+    text = msg.text.strip()
+    if text.lower() in ["لا", "لايوجد"]:
+        note = ""
+    else:
+        note = text
+    await state.update_data(urgent_note=note, is_urgent=True)
+    await msg.answer("🧵 اختر نوع الطلب:", reply_markup=get_order_type_kb())
     await OrderState.order_type.set()
 
 @dp.callback_query_handler(lambda c: c.data.startswith("type_"), state=OrderState.order_type)
