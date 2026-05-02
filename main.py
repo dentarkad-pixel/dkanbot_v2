@@ -1083,7 +1083,7 @@ async def route_after_piece_selection(target_message: types.Message, state: FSMC
         await target_message.answer("🧣 صاحب الوشاح؟", reply_markup=get_scarf_owner_kb())
         await OrderState.scarf_owner.set()
         return
-    if data.get("need_supplies"):
+    if data.get("need_supplies") and not data.get("supplies_type"):
         supplies_types = data.get("supplies_types", [])
         if not supplies_types:
             await target_message.answer("🧰 اختر نوع المستلزمات:", reply_markup=get_supplies_kb([]))
@@ -1858,7 +1858,11 @@ async def process_supplies_type(call: types.CallbackQuery, state: FSMContext):
         if not data.get("supplies_types"):
             await call.answer("❌ اختر نوع واحد على الأقل!", show_alert=True)
             return
-        await state.update_data(supplies_type=", ".join(data.get("supplies_types", [])))
+        selected_supplies = data.get("supplies_types", [])
+        await state.update_data(
+            supplies_type=", ".join(selected_supplies),
+            supplies_types=[]
+        )
         await call.answer()
         await route_after_piece_selection(call.message, state)
         return
