@@ -12,13 +12,10 @@ from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from openpyxl import Workbook, load_workbook
 from datetime import datetime
-
 # ================= TOKEN & GROUPS =================
 API_TOKEN = os.getenv("BOT_TOKEN")
-
 if not API_TOKEN:
     raise ValueError("❌ BOT_TOKEN environment variable not set!")
-
 def env_int(name: str, default=None):
     value = os.getenv(name)
     if value is None or value.strip() == "":
@@ -895,6 +892,9 @@ def get_status_buttons(order_id: int, current_group: str = "new") -> InlineKeybo
     
     if current_group != "issues":
         kb.insert(InlineKeyboardButton("⚠️ مشاكل", callback_data=f"move_{order_id}_issues"))
+
+    if current_group != "new_urgent":
+        kb.insert(InlineKeyboardButton("🛎️ مستعجل", callback_data=f"mark_urgent_{order_id}"))
     
     kb.insert(InlineKeyboardButton("📝 تعديل", callback_data=f"edit_{order_id}"))
     
@@ -1527,24 +1527,76 @@ async def process_urgent(call: types.CallbackQuery, state: FSMContext):
     is_urgent = call.data == "urgent_yes"
     await state.update_data(is_urgent=is_urgent)
     await call.answer()
-    if is_urgent:
-        await call.message.answer("📝 اكتب ملاحظة المستعجل (اختياري)، أو اكتب 'لا' لتخطي:")
-        await OrderState.urgent_note.set()
-    else:
-        await call.message.answer("🧵 اختر نوع الطلب:", reply_markup=get_order_type_kb())
+    await call.message.answer("🧵 اختر نوع الطلب:", reply_markup=get_order_type_kb())
+    await OrderState.order_type.set()
+
+@dp.message_handler(state=OrderState.urgent)
+async def process_urgent_text(msg: types.Message, state: FSMContext):
+    text = msg.text.strip().lower()
+    if text in ["نعم", "yes", "y"]:
+        await state.update_data(is_urgent=True)
+        await msg.answer("🧵 اختر نوع الطلب:", reply_markup=get_order_type_kb())
         await OrderState.order_type.set()
+        return
+    if text in ["لا", "no", "n"]:
+        await state.update_data(is_urgent=False)
+        await msg.answer("🧵 اختر نوع الطلب:", reply_markup=get_order_type_kb())
+        await OrderState.order_type.set()
+        return
+    await msg.answer("❌ اختر نعم أو لا:", reply_markup=get_urgent_kb())
 
 
 @dp.message_handler(state=OrderState.urgent_note)
 async def process_urgent_note(msg: types.Message, state: FSMContext):
     text = msg.text.strip()
-    if text.lower() in ["لا", "لايوجد"]:
-        note = ""
+    if not text:
+        await msg.answer("❌ اكتب ملاحظة المستعجل:")
+        return
+
+    data = await state.get_data()
+    order_id = data.get("urgent_order_id")
+    if not order_id:
+        # حالة احتياطية في حال دخل المستخدم هنا بدون تحديد طلب.
+        await state.update_data(urgent_note=text, is_urgent=True)
+        await msg.answer("🧵 اختر نوع الطلب:", reply_markup=get_order_type_kb())
+        await OrderState.order_type.set()
+        return
+
+    if order_id not in orders_data:
+        await msg.answer("❌ لم أجد الطلب المطلوب.")
+        await state.finish()
+        return
+
+    orders_data[order_id]["data"]["is_urgent"] = True
+    orders_data[order_id]["data"]["urgent_note"] = text
+
+    current_group = orders_data[order_id]["current_group"]
+    if current_group == "new_urgent":
+        await _refresh_order_message(order_id)
+        save_runtime_state()
+        await msg.answer(f"✅ تم تحديث الطلب #{order_id} كمستعجل.")
     else:
-        note = text
-    await state.update_data(urgent_note=note, is_urgent=True)
-    await msg.answer("🧵 اختر نوع الطلب:", reply_markup=get_order_type_kb())
-    await OrderState.order_type.set()
+        await _move_order_to_status(order_id, "new_urgent")
+        await msg.answer(f"✅ تم تحويل الطلب #{order_id} إلى مستعجل.")
+
+    await state.finish()
+
+@dp.callback_query_handler(lambda c: c.data.startswith("mark_urgent_"))
+async def mark_order_urgent(call: types.CallbackQuery, state: FSMContext):
+    try:
+        parts = call.data.split("_")
+        order_id = int(parts[2])
+        if order_id not in orders_data:
+            await call.answer("❌ لم أجد الطلب!", show_alert=True)
+            return
+
+        await state.update_data(urgent_order_id=order_id)
+        await call.answer()
+        await call.message.answer("📝 اكتب ملاحظة المستعجل لهذا الطلب:")
+        await OrderState.urgent_note.set()
+    except Exception as e:
+        print(f"❌ خطأ في mark_order_urgent: {e}")
+        await call.answer("❌ حدث خطأ", show_alert=True)
 
 @dp.callback_query_handler(lambda c: c.data.startswith("type_"), state=OrderState.order_type)
 async def process_order_type(call: types.CallbackQuery, state: FSMContext):
@@ -2058,6 +2110,93 @@ async def cancel_edit(call: types.CallbackQuery, state: FSMContext):
         await call.message.answer("✅ تم إلغاء التعديل")
     except Exception as e:
         print(f"❌ خطأ: {e}")
+
+async def _refresh_order_message(order_id: int) -> bool:
+    if order_id not in orders_data:
+        return False
+    current_group = orders_data[order_id]["current_group"]
+    current_target = get_target(current_group)
+    current_target_key = get_target_key(current_group)
+    text = format_order_text(orders_data[order_id]["data"], order_id, current_group)
+    status_kb = get_status_buttons(order_id, current_group)
+
+    try:
+        if order_id in message_ids and current_target_key in message_ids[order_id]:
+            for msg_id in reversed(message_ids[order_id][current_target_key]):
+                try:
+                    await bot.edit_message_text(
+                        chat_id=current_target["chat_id"],
+                        message_id=msg_id,
+                        text=text,
+                        reply_markup=status_kb,
+                        parse_mode='Markdown'
+                    )
+                    return True
+                except Exception as e:
+                    print(f"⚠️ خطأ في تحديث الرسالة {msg_id}: {e}")
+    except Exception as e:
+        print(f"⚠️ خطأ في تحديث الرسالة: {e}")
+    return False
+
+async def _move_order_to_status(order_id: int, destination_status: str) -> bool:
+    if order_id not in orders_data:
+        return False
+
+    order_info = orders_data[order_id]
+    data = order_info["data"]
+    images_list = order_info["images"]
+    current_group = order_info["current_group"]
+
+    if current_group == destination_status:
+        return True
+
+    target = get_target(destination_status)
+    target_key = get_target_key(destination_status)
+    text = format_order_text(data, order_id, destination_status)
+    status_kb = get_status_buttons(order_id, destination_status)
+
+    current_target = get_target(current_group)
+    current_target_key = get_target_key(current_group)
+    target_send_kwargs = {}
+    if target["thread_id"]:
+        target_send_kwargs["message_thread_id"] = target["thread_id"]
+
+    try:
+        if order_id in message_ids and current_target_key in message_ids[order_id]:
+            for msg_id in message_ids[order_id][current_target_key]:
+                try:
+                    await bot.delete_message(chat_id=current_target["chat_id"], message_id=msg_id)
+                except Exception as e:
+                    print(f"⚠️ خطأ في حذف الرسالة {msg_id}: {e}")
+            del message_ids[order_id][current_target_key]
+    except Exception as e:
+        print(f"⚠️ خطأ في حذف الرسائل: {e}")
+
+    if images_list:
+        media = [InputMediaPhoto(media=i) for i in images_list]
+        msg_group = await bot.send_media_group(chat_id=target["chat_id"], media=media, **target_send_kwargs)
+        if order_id not in message_ids:
+            message_ids[order_id] = {}
+        if msg_group:
+            message_ids[order_id][target_key] = [m.message_id for m in msg_group]
+
+    msg_text = await bot.send_message(
+        chat_id=target["chat_id"],
+        text=text,
+        reply_markup=status_kb,
+        parse_mode='Markdown',
+        **target_send_kwargs
+    )
+
+    if order_id not in message_ids:
+        message_ids[order_id] = {}
+    if target_key not in message_ids[order_id]:
+        message_ids[order_id][target_key] = []
+    message_ids[order_id][target_key].append(msg_text.message_id)
+
+    orders_data[order_id]["current_group"] = destination_status
+    save_runtime_state()
+    return True
 
 # ================= MOVE ORDER HANDLER =================
 @dp.callback_query_handler(lambda c: c.data.startswith("move_"))
