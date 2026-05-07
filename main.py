@@ -149,6 +149,17 @@ def resolve_new_order_status(data: dict) -> str:
 
     return "new_printing"
 
+def is_order_active_in_status(order_id: int, status: str) -> bool:
+    if order_id not in orders_data:
+        return False
+    if orders_data[order_id].get("current_group") != status:
+        return False
+    target_key = get_target_key(status)
+    return bool(message_ids.get(order_id, {}).get(target_key))
+
+def is_ready_exportable(order_id: int) -> bool:
+    return is_order_active_in_status(order_id, "ready") and order_id not in ready_exported_ids
+
 # الكليشية
 FOOTER_TEXT = """
 ━━━━━━━━━━━━━━━━━━
@@ -163,6 +174,7 @@ dp = Dispatcher(bot, storage=MemoryStorage())
 orders_data = {}
 message_ids = {}
 imported_order_ids = set()
+ready_exported_ids = set()
 order_id_lock = asyncio.Lock()
 last_reserved_order_id = None
 forwarded_media_cache = {}
@@ -203,7 +215,8 @@ def save_runtime_state(file_name: str = STATE_FILE):
         payload = {
             "orders_data": {str(k): v for k, v in orders_data.items()},
             "message_ids": _encode_message_ids(message_ids),
-            "imported_order_ids": sorted(imported_order_ids)
+            "imported_order_ids": sorted(imported_order_ids),
+            "ready_exported_ids": sorted(ready_exported_ids)
         }
         with open(file_name, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False)
@@ -211,7 +224,7 @@ def save_runtime_state(file_name: str = STATE_FILE):
         print(f"⚠️ تعذر حفظ حالة البوت: {e}")
 
 def load_runtime_state(file_name: str = STATE_FILE):
-    global orders_data, message_ids, imported_order_ids
+    global orders_data, message_ids, imported_order_ids, ready_exported_ids
     try:
         ensure_data_dir()
         if not os.path.exists(file_name):
@@ -221,6 +234,7 @@ def load_runtime_state(file_name: str = STATE_FILE):
         orders_data = {int(k): v for k, v in payload.get("orders_data", {}).items()}
         message_ids = _decode_message_ids(payload.get("message_ids", {}))
         imported_order_ids = set(int(x) for x in payload.get("imported_order_ids", []))
+        ready_exported_ids = set(int(x) for x in payload.get("ready_exported_ids", []))
         print(f"✅ تم تحميل حالة البوت: {len(orders_data)} طلب")
     except Exception as e:
         print(f"⚠️ تعذر تحميل حالة البوت: {e}")
@@ -752,29 +766,30 @@ def create_ready_orders_file():
         _write_header(ws)
         
         for order_id, order_info in orders_data.items():
-            if order_info.get("current_group") == "ready":
-                data = order_info.get("data", {})
-                notes_field = data.get("notes", "")
+            if not is_ready_exportable(order_id):
+                continue
+            data = order_info.get("data", {})
+            notes_field = data.get("notes", "")
 
-                order_row = [
-                    notes_field,
-                    6,
-                    "",
-                    _excel_phone(data.get("phone", "")),
-                    _excel_address(data.get("city", ""), data.get("area", "")),
-                    get_city_code(data.get("city")),
-                    data.get("name", ""),
-                    _coerce_price(data.get("price")),
-                    "",
-                    "",
-                    "",
-                    _excel_order_type(data.get("order_type", "")),
-                    ""
-                ]
+            order_row = [
+                notes_field,
+                6,
+                "",
+                _excel_phone(data.get("phone", "")),
+                _excel_address(data.get("city", ""), data.get("area", "")),
+                get_city_code(data.get("city")),
+                data.get("name", ""),
+                _coerce_price(data.get("price")),
+                "",
+                "",
+                "",
+                _excel_order_type(data.get("order_type", "")),
+                ""
+            ]
 
-                target_row = _find_next_order_row(ws)
-                for col_idx, value in enumerate(order_row, start=1):
-                    ws.cell(row=target_row, column=col_idx, value=value)
+            target_row = _find_next_order_row(ws)
+            for col_idx, value in enumerate(order_row, start=1):
+                ws.cell(row=target_row, column=col_idx, value=value)
         
         wb.save(READY_FILE)
         print(f"✅ تم إنشاء ملف الطلبات الجاهزة: {READY_FILE}")
@@ -1239,7 +1254,7 @@ async def _ask_next_dist_detail(target_message: types.Message, state: FSMContext
                     await target_message.answer("🪵 اكتب اسم الخشب:")
                     await OrderState.box_wood_name.set()
                 elif step == "dist_count":
-                    await target_message.answer("🎉 اكتب عدد التوزيعات:")
+                    await target_message.answer(f"🎉 اكتب عدد توزيعات {dist_type}:")
                     await OrderState.dist_count.set()
                 elif step == "dist_color":
                     await target_message.answer("🎨 اكتب لون التوزيعات:")
@@ -1259,6 +1274,11 @@ def get_size_kb() -> InlineKeyboardMarkup:
 def get_done_images_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup(row_width=1)
     kb.add(InlineKeyboardButton("✅ تم", callback_data="done_images"))
+    return kb
+
+def get_ready_export_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardMarkup(row_width=1)
+    kb.add(InlineKeyboardButton("🧹 تصفير قائمة الجاهز", callback_data="clear_ready_export"))
     return kb
 
 def get_edit_options_kb(order_id: int) -> InlineKeyboardMarkup:
@@ -1298,21 +1318,13 @@ async def cmd_cancel(msg: types.Message, state: FSMContext):
 async def cmd_download(msg: types.Message):
     """تحميل ملف الطلبات الموجودة في كروب مجهز فقط"""
     
-    ready_orders = {oid: info for oid, info in orders_data.items() 
-                    if info.get("current_group") == "ready"}
+    ready_orders = {
+        oid: info for oid, info in orders_data.items()
+        if is_ready_exportable(oid)
+    }
     
     if not ready_orders:
-        # fallback: إرسال ملف كل الطلبات القديمة الموجود في الإكسل
-        if os.path.exists(ORDERS_FILE):
-            with open(ORDERS_FILE, 'rb') as file:
-                await bot.send_document(
-                    chat_id=msg.from_user.id,
-                    document=types.InputFile(ORDERS_FILE),
-                    caption="📊 لا توجد حالات مجهز محفوظة حالياً، تم إرسال أرشيف الطلبات من الإكسل"
-                )
-            await msg.answer("✅ تم إرسال الأرشيف من orders.xlsx")
-        else:
-            await msg.answer("❌ لا توجد طلبات في كروب 'مجهز' حتى الآن!")
+        await msg.answer("❌ لا توجد طلبات في كروب 'مجهز' حتى الآن!")
         return
     
     try:
@@ -1326,6 +1338,7 @@ async def cmd_download(msg: types.Message):
                     caption=f"📊 ملف الطلبات الجاهزة\n\n📦 عدد الطلبات: {len(ready_orders)}"
                 )
             await msg.answer("✅ تم إرسال الملف!")
+            await msg.answer("🧹 إذا تريد تبدأ قائمة جاهز جديدة، اضغط الزر:", reply_markup=get_ready_export_kb())
         else:
             await msg.answer("❌ حدث خطأ في إنشاء الملف!")
     
@@ -1886,7 +1899,10 @@ async def process_dist_count(msg: types.Message, state: FSMContext):
         if int(count) <= 0:
             raise ValueError
     except:
-        await msg.answer("❌ أدخل رقماً صحيحاً أكبر من 0:")
+        data = await state.get_data()
+        dist_type = data.get("dist_active_type")
+        label = f"توزيعات {dist_type}" if dist_type else "التوزيعات"
+        await msg.answer(f"❌ أدخل رقم صحيح أكبر من 0 لـ {label}:")
         return
     await state.update_data(dist_count=count)
     data = await state.get_data()
@@ -2227,6 +2243,8 @@ async def _move_order_to_status(order_id: int, destination_status: str) -> bool:
     message_ids[order_id][target_key].append(msg_text.message_id)
 
     orders_data[order_id]["current_group"] = destination_status
+    if destination_status == "ready":
+        ready_exported_ids.discard(order_id)
     save_runtime_state()
     return True
 
@@ -2304,6 +2322,8 @@ async def move_order(call: types.CallbackQuery):
         message_ids[order_id][target_key].append(msg_text.message_id)
         
         orders_data[order_id]["current_group"] = destination_status
+        if destination_status == "ready":
+            ready_exported_ids.discard(order_id)
         save_runtime_state()
 
         target_name = STATUS_DISPLAY_NAMES.get(destination_status, destination_status)
@@ -2312,6 +2332,25 @@ async def move_order(call: types.CallbackQuery):
     except Exception as e:
         print(f"❌ خطأ: {e}")
         await call.answer(f"❌ خطأ!", show_alert=True)
+
+@dp.callback_query_handler(lambda c: c.data == "clear_ready_export")
+async def clear_ready_export(call: types.CallbackQuery):
+    ready_now = [oid for oid in orders_data if is_order_active_in_status(oid, "ready")]
+    if not ready_now:
+        await call.answer("لا توجد طلبات جاهزة حالياً.", show_alert=True)
+        return
+
+    for oid in ready_now:
+        ready_exported_ids.add(oid)
+    save_runtime_state()
+
+    try:
+        await call.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    await call.answer("✅ تم تصفير قائمة الجاهز", show_alert=True)
+    await call.message.answer("✅ تم تصفير قائمة الجاهز. التنزيل القادم سيشمل الطلبات الجديدة فقط.")
 
 if __name__ == "__main__":
     print("🚀 البوت يعمل...")
