@@ -255,6 +255,7 @@ class OrderState(StatesGroup):
     sport_weight = State()
     pieces = State()
     over_type = State()
+    over_kind = State()
     hand_type = State()
     shafa_color = State()
     scarf_owner = State()
@@ -934,7 +935,10 @@ def format_order_text(data: dict, order_id: int, current_group: str = "new") -> 
 
     scarf_line = f"\n🧣 *صاحب الوشاح:* {data.get('scarf_owner')}" if data.get("scarf_owner") else ""
     shafa_line = f"\n🌈 *لون الشفقة:* {data.get('shafa_color')}" if data.get("shafa_color") else ""
-    over_line = f"\n✨ *نوع الأوفر:* {data.get('over_type')}" if data.get("over_type") else ""
+    over_display = data.get('over_type')
+    if data.get('over_kind'):
+        over_display = f"{over_display} - {data.get('over_kind')}"
+    over_line = f"\n✨ *نوع الأوفر:* {over_display}" if over_display else ""
     hand_line = f"\n🛏 *نوع الملحف:* {data.get('hand_type')}" if data.get("hand_type") else ""
     supplies_line = f"\n🧰 *المستلزمات:* {data.get('supplies_type')}" if data.get("supplies_type") else ""
 
@@ -1079,6 +1083,10 @@ async def route_after_piece_selection(target_message: types.Message, state: FSMC
         await target_message.answer("✨ نوع الأوفر:", reply_markup=get_over_type_kb())
         await OrderState.over_type.set()
         return
+    if data.get("need_over") and data.get("over_type") and not data.get("over_kind"):
+        await target_message.answer("🎀 اختر نوع الأوفر:", reply_markup=get_over_kind_kb())
+        await OrderState.over_kind.set()
+        return
     if data.get("need_hand") and not data.get("hand_type"):
         await target_message.answer("🛏 نوع الملحف:", reply_markup=get_hand_type_kb())
         await OrderState.hand_type.set()
@@ -1132,6 +1140,14 @@ def get_over_type_kb() -> InlineKeyboardMarkup:
         InlineKeyboardButton("🧵 طباكات", callback_data="over_طباكات"),
         InlineKeyboardButton("📄 صفح", callback_data="over_صفح"),
         InlineKeyboardButton("🎀🧵 دانتيل+طباكات", callback_data="over_دانتيل+طباكات")
+    )
+    return kb
+
+def get_over_kind_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("✨ أوفر ردن", callback_data="over_kind_ردن"),
+        InlineKeyboardButton("✨✨ أوفر نص ردن", callback_data="over_kind_نص ردن")
     )
     return kb
 
@@ -1231,7 +1247,7 @@ def _dist_required_steps(dist_type: str) -> list:
     if dist_type in DIST_WOOD_TYPES:
         steps.append("box_wood_name")
     elif dist_type in DIST_BOX_TYPES:
-        steps.extend(["box_color", "box_wood_name"])
+        steps.append("box_color")
     if dist_type in DIST_COLOR_TYPES:
         steps.extend(["dist_count", "dist_color"])
     elif dist_type in DIST_COUNT_TYPES:
@@ -1643,6 +1659,7 @@ async def process_order_type(call: types.CallbackQuery, state: FSMContext):
         sport_number=None,
         sport_weight=None,
         over_type=None,
+        over_kind=None,
         hand_type=None,
         shafa_color=None,
         scarf_owner=None,
@@ -1771,6 +1788,13 @@ async def process_done_pieces(call: types.CallbackQuery, state: FSMContext):
 async def process_over_type(call: types.CallbackQuery, state: FSMContext):
     over_choice = call.data.replace("over_", "")
     await state.update_data(over_type=over_choice)
+    await call.message.answer("🎀 اختر نوع الأوفر:", reply_markup=get_over_kind_kb())
+    await OrderState.over_kind.set()
+
+@dp.callback_query_handler(lambda c: c.data.startswith("over_kind_"), state=OrderState.over_kind)
+async def process_over_kind(call: types.CallbackQuery, state: FSMContext):
+    over_kind = call.data.replace("over_kind_", "")
+    await state.update_data(over_kind=over_kind)
     await route_after_piece_selection(call.message, state)
 
 @dp.callback_query_handler(lambda c: c.data.startswith("hand_"), state=OrderState.hand_type)
