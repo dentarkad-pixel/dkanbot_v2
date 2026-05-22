@@ -890,6 +890,14 @@ def validate_sport_number(num: str) -> bool:
     # للسيت الرياضي نسمح بأي كتابة على الظهر (أرقام/حروف/رموز)
     return len(num.strip()) > 0
 
+def _md_escape(value: str) -> str:
+    if value is None:
+        return ""
+    text = str(value)
+    for ch in ["\\", "_", "*", "[", "]", "(", ")", "`"]:
+        text = text.replace(ch, f"\\{ch}")
+    return text
+
 # ================= HELPER FUNCTIONS =================
 def get_status_buttons(order_id: int, current_group: str = "new") -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup(row_width=2)
@@ -917,14 +925,14 @@ def get_status_buttons(order_id: int, current_group: str = "new") -> InlineKeybo
     return kb
 
 def format_order_text(data: dict, order_id: int, current_group: str = "new") -> str:
-    source = data.get("source", "غير محدد")
-    group_display = STATUS_DISPLAY_NAMES.get(current_group, "غير معروف")
+    source = _md_escape(data.get("source", "غير محدد"))
+    group_display = _md_escape(STATUS_DISPLAY_NAMES.get(current_group, "غير معروف"))
     urgent_text = "نعم" if data.get("is_urgent") else "لا"
-    urgent_note_text = data.get("urgent_note") or ""
+    urgent_note_text = _md_escape(data.get("urgent_note") or "")
 
-    team = data.get("team")
-    sport_number = data.get("sport_number")
-    sport_weight = data.get("sport_weight")
+    team = _md_escape(data.get("team"))
+    sport_number = _md_escape(data.get("sport_number"))
+    sport_weight = _md_escape(data.get("sport_weight"))
     sport_line = ""
     if team:
         sport_line += f"\n⚽ *الفريق:* {team}"
@@ -933,14 +941,19 @@ def format_order_text(data: dict, order_id: int, current_group: str = "new") -> 
     if sport_weight:
         sport_line += f"\n⚖️ *وزن الطفل:* {sport_weight}"
 
-    scarf_line = f"\n🧣 *صاحب الوشاح:* {data.get('scarf_owner')}" if data.get("scarf_owner") else ""
-    shafa_line = f"\n🌈 *لون الشفقة:* {data.get('shafa_color')}" if data.get("shafa_color") else ""
-    over_display = data.get('over_type')
-    if data.get('over_kind'):
-        over_display = f"{over_display} - {data.get('over_kind')}"
+    scarf_owner = _md_escape(data.get("scarf_owner"))
+    shafa_color = _md_escape(data.get("shafa_color"))
+    over_display = _md_escape(data.get("over_type"))
+    over_kind = _md_escape(data.get("over_kind"))
+    if over_kind:
+        over_display = f"{over_display} - {over_kind}" if over_display else over_kind
     over_line = f"\n✨ *نوع الأوفر:* {over_display}" if over_display else ""
-    hand_line = f"\n🛏 *نوع الملحف:* {data.get('hand_type')}" if data.get("hand_type") else ""
-    supplies_line = f"\n🧰 *المستلزمات:* {data.get('supplies_type')}" if data.get("supplies_type") else ""
+    hand_type = _md_escape(data.get("hand_type"))
+    supplies_type = _md_escape(data.get("supplies_type"))
+    scarf_line = f"\n🧣 *صاحب الوشاح:* {scarf_owner}" if scarf_owner else ""
+    shafa_line = f"\n🌈 *لون الشفقة:* {shafa_color}" if shafa_color else ""
+    hand_line = f"\n🛏 *نوع الملحف:* {hand_type}" if hand_type else ""
+    supplies_line = f"\n🧰 *المستلزمات:* {supplies_type}" if supplies_type else ""
 
     dist_types = data.get("dist_types") or ([] if not data.get("dist_type") else [data.get("dist_type")])
     dist_details = data.get("dist_details", {})
@@ -951,35 +964,45 @@ def format_order_text(data: dict, order_id: int, current_group: str = "new") -> 
         details = dist_details.get(item, {})
         parts = []
         if details.get("dist_count"):
-            parts.append(f"عدد: {details['dist_count']}")
+            parts.append(f"عدد: {_md_escape(details['dist_count'])}")
         if details.get("dist_color"):
-            parts.append(f"لون: {details['dist_color']}")
+            parts.append(f"لون: {_md_escape(details['dist_color'])}")
         if details.get("box_color"):
-            parts.append(f"لون البوكس: {details['box_color']}")
+            parts.append(f"لون البوكس: {_md_escape(details['box_color'])}")
         if details.get("box_wood_name"):
-            parts.append(f"اسم الخشب: {details['box_wood_name']}")
-        dist_items.append(f"{item} ({'، '.join(parts)})" if parts else item)
+            parts.append(f"اسم الخشب: {_md_escape(details['box_wood_name'])}")
+        safe_item = _md_escape(item)
+        dist_items.append(f"{safe_item} ({'، '.join(parts)})" if parts else safe_item)
     dist_type_line = f"\n🎉 *التوزيعات:* {', '.join(dist_items)}" if dist_items else ""
 
-    size_line = f"\n📏 *القياس:* {data.get('size', '')}" if data.get("size") else ""
+    size_value = _md_escape(data.get("size", ""))
+    size_line = f"\n📏 *القياس:* {size_value}" if size_value else ""
     urgent_note_line = f"\n🛎️ *ملاحظة المستعجل:* {urgent_note_text}" if urgent_note_text else ""
+    safe_name = _md_escape(data.get("name", ""))
+    safe_phone = _md_escape(data.get("phone", ""))
+    safe_city = _md_escape(data.get("city", ""))
+    safe_area = _md_escape(data.get("area", ""))
+    safe_pieces = ", ".join(_md_escape(p) for p in data.get("pieces", []))
+    safe_price = _md_escape(data.get("price", ""))
+    safe_notes = _md_escape(data.get("notes", ""))
+    safe_order_type = _md_escape(data.get("order_type", ""))
 
     text = f"""📦 *طلب #{order_id}*
 
-👤 *اسم الطفل:* {data.get('name', '')}
-📞 *الهاتف:* {data.get('phone', '')}
+👤 *اسم الطفل:* {safe_name}
+📞 *الهاتف:* {safe_phone}
 📱 *المصدر:* {source}
-📍 *المحافظة - المنطقة:* {data.get('city', '')} - {data.get('area', '')}
+📍 *المحافظة - المنطقة:* {safe_city} - {safe_area}
 ⏰ *مستعجل:* {urgent_text}{urgent_note_line}
 
-🧵 *النوع:* {data.get('order_type', '')}
+🧵 *النوع:* {safe_order_type}
 {sport_line}
-👕 *القطع:* {', '.join(data.get('pieces', []))}
+👕 *القطع:* {safe_pieces}
 {over_line}{hand_line}{scarf_line}{shafa_line}{supplies_line}{dist_type_line}{size_line}
-💰 *السعر:* {data.get('price', '')} دينار عراقي
+💰 *السعر:* {safe_price} دينار عراقي
 
 📝 *الملاحظات:*
-{data.get('notes', '')}
+{safe_notes}
 
 ━━━━━━━━━━━━━━━━━━
 📍 *الحالة الحالية:* {group_display}
