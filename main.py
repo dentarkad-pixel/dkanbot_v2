@@ -607,11 +607,10 @@ async def _post_order_to_group(order_id: int, data: dict, images_list: list, sta
         if msg_group:
             message_ids[order_id][target_key] = [m.message_id for m in msg_group]
 
-    msg_text = await bot.send_message(
+    msg_text = await _safe_send_message(
         chat_id=target["chat_id"],
         text=text,
         reply_markup=status_kb,
-        parse_mode='Markdown',
         **send_kwargs
     )
 
@@ -897,6 +896,46 @@ def _md_escape(value: str) -> str:
     for ch in ["\\", "_", "*", "[", "]", "(", ")", "`"]:
         text = text.replace(ch, f"\\{ch}")
     return text
+
+async def _safe_send_message(chat_id: int, text: str, reply_markup=None, parse_mode: str = "Markdown", **kwargs):
+    try:
+        return await bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+            **kwargs
+        )
+    except Exception as e:
+        if "Can't parse entities" in str(e) or "parse entities" in str(e):
+            return await bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=reply_markup,
+                **kwargs
+            )
+        raise
+
+async def _safe_edit_message_text(chat_id: int, message_id: int, text: str, reply_markup=None, parse_mode: str = "Markdown", **kwargs):
+    try:
+        return await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+            **kwargs
+        )
+    except Exception as e:
+        if "Can't parse entities" in str(e) or "parse entities" in str(e):
+            return await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=text,
+                reply_markup=reply_markup,
+                **kwargs
+            )
+        raise
 
 # ================= HELPER FUNCTIONS =================
 def get_status_buttons(order_id: int, current_group: str = "new") -> InlineKeyboardMarkup:
@@ -2052,11 +2091,10 @@ async def _finalize_order(msg: types.Message, state: FSMContext):
             if msg_group:
                 message_ids[order_id][target_key] = [m.message_id for m in msg_group]
 
-        msg_text = await bot.send_message(
+        msg_text = await _safe_send_message(
             chat_id=target["chat_id"],
             text=text,
             reply_markup=status_kb,
-            parse_mode='Markdown',
             **send_kwargs
         )
 
@@ -2166,12 +2204,11 @@ async def save_edited_field(msg: types.Message, state: FSMContext):
                 # حدّث آخر رسالة (رسالة النص، ليست الصور)
                 for msg_id in reversed(message_ids[order_id][current_target_key]):
                     try:
-                        await bot.edit_message_text(
+                        await _safe_edit_message_text(
                             chat_id=current_target["chat_id"],
                             message_id=msg_id,
                             text=text,
-                            reply_markup=status_kb,
-                            parse_mode='Markdown'
+                            reply_markup=status_kb
                         )
                         print(f"✅ تم تحديث الرسالة {msg_id}")
                         break
@@ -2219,12 +2256,11 @@ async def _refresh_order_message(order_id: int) -> bool:
         if order_id in message_ids and current_target_key in message_ids[order_id]:
             for msg_id in reversed(message_ids[order_id][current_target_key]):
                 try:
-                    await bot.edit_message_text(
+                    await _safe_edit_message_text(
                         chat_id=current_target["chat_id"],
                         message_id=msg_id,
                         text=text,
-                        reply_markup=status_kb,
-                        parse_mode='Markdown'
+                        reply_markup=status_kb
                     )
                     return True
                 except Exception as e:
@@ -2275,11 +2311,10 @@ async def _move_order_to_status(order_id: int, destination_status: str) -> bool:
         if msg_group:
             message_ids[order_id][target_key] = [m.message_id for m in msg_group]
 
-    msg_text = await bot.send_message(
+    msg_text = await _safe_send_message(
         chat_id=target["chat_id"],
         text=text,
         reply_markup=status_kb,
-        parse_mode='Markdown',
         **target_send_kwargs
     )
 
@@ -2354,11 +2389,10 @@ async def move_order(call: types.CallbackQuery):
             if msg_group:
                 message_ids[order_id][target_key] = [m.message_id for m in msg_group]
         
-        msg_text = await bot.send_message(
+        msg_text = await _safe_send_message(
             chat_id=target["chat_id"], 
             text=text, 
             reply_markup=status_kb, 
-            parse_mode='Markdown',
             **target_send_kwargs
         )
         
