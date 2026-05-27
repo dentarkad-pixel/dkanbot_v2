@@ -456,8 +456,8 @@ def _parse_order_text(text: str) -> dict:
 
     scarf_owner = _clean_optional(get_value("صاحب الوشاح"))
     shafa_color = _clean_optional(get_value("لون الشفقة"))
-    over_type = _clean_optional(get_value("الأوفر"))
-    hand_type = _clean_optional(get_value("الملحف"))
+    over_type = _clean_optional(get_value("الأوفر") or get_value("نوع الأوفر"))
+    hand_type = _clean_optional(get_value("الملحف") or get_value("نوع الملحف"))
     box_color = _clean_optional(get_value("لون البوكس"))
     box_wood_name = _clean_optional(get_value("اسم الخشب"))
     dist_type_raw = _clean_optional(get_value("التوزيعات"))
@@ -936,6 +936,39 @@ async def _safe_edit_message_text(chat_id: int, message_id: int, text: str, repl
                 **kwargs
             )
         raise
+
+def _infer_status_from_message(msg: types.Message) -> str:
+    thread_id = getattr(msg, "message_thread_id", None)
+    for status, target in TARGETS_MAP.items():
+        if msg.chat.id != target["chat_id"]:
+            continue
+        if (target["thread_id"] or 0) == (thread_id or 0):
+            return status
+    return None
+
+def _ensure_order_from_message(order_id: int, msg: types.Message) -> bool:
+    if order_id in orders_data:
+        return True
+    text = msg.text or msg.caption or ""
+    if not text:
+        return False
+    data = _parse_order_text(text)
+    if not data.get("name") or not data.get("phone"):
+        return False
+    data["id"] = order_id
+    status = _infer_status_from_message(msg) or resolve_new_order_status(data)
+    orders_data[order_id] = {
+        "data": data,
+        "images": [],
+        "current_group": status
+    }
+    target_key = get_target_key(status)
+    message_ids.setdefault(order_id, {})
+    message_ids[order_id].setdefault(target_key, [])
+    if msg.message_id not in message_ids[order_id][target_key]:
+        message_ids[order_id][target_key].append(msg.message_id)
+    save_runtime_state()
+    return True
 
 # ================= HELPER FUNCTIONS =================
 def get_status_buttons(order_id: int, current_group: str = "new") -> InlineKeyboardMarkup:
@@ -1694,8 +1727,11 @@ async def mark_order_urgent(call: types.CallbackQuery, state: FSMContext):
         parts = call.data.split("_")
         order_id = int(parts[2])
         if order_id not in orders_data:
-            await call.answer("❌ لم أجد الطلب!", show_alert=True)
-            return
+            if not _ensure_order_from_message(order_id, call.message):
+                await call.answer("❌ لم أجد الطلب!", show_alert=True)
+                return
+
+        await call.answer("⏳ جاري نقل الطلب...", show_alert=False)
 
         await state.update_data(urgent_order_id=order_id)
         await call.answer()
@@ -2119,8 +2155,9 @@ async def edit_order_start(call: types.CallbackQuery, state: FSMContext):
         order_id = int(call.data.split("_")[1])
         
         if order_id not in orders_data:
-            await call.answer("❌ لم أجد الطلب!", show_alert=True)
-            return
+            if not _ensure_order_from_message(order_id, call.message):
+                await call.answer("❌ لم أجد الطلب!", show_alert=True)
+                return
         
         await state.update_data(edit_order_id=order_id)
         await call.message.answer(
@@ -2339,8 +2376,9 @@ async def move_order(call: types.CallbackQuery):
         target_group_name = parts[2]
 
         if order_id not in orders_data:
-            await call.answer("❌ لم أجد الطلب!", show_alert=True)
-            return
+            if not _ensure_order_from_message(order_id, call.message):
+                await call.answer("❌ لم أجد الطلب!", show_alert=True)
+                return
 
         order_info = orders_data[order_id]
         data = order_info["data"]
@@ -2407,12 +2445,12 @@ async def move_order(call: types.CallbackQuery):
             ready_exported_ids.discard(order_id)
         save_runtime_state()
 
-        target_name = STATUS_DISPLAY_NAMES.get(destination_status, destination_status)
-        await call.answer(f"✅ {target_name}", show_alert=False)
-
     except Exception as e:
         print(f"❌ خطأ: {e}")
-        await call.answer(f"❌ خطأ!", show_alert=True)
+        try:
+            await call.answer("❌ خطأ!", show_alert=True)
+        except Exception:
+            pass
 
 @dp.callback_query_handler(lambda c: c.data == "clear_ready_export")
 async def clear_ready_export(call: types.CallbackQuery):
