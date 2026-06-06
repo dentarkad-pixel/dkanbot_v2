@@ -525,6 +525,11 @@ async def _import_from_forwarded_message(msg: types.Message, text_override: str 
 
     order_id = await reserve_next_order_id()
     data["id"] = order_id
+    forward_date = getattr(msg, "forward_date", None)
+    if forward_date:
+        data["created_at"] = forward_date.isoformat(sep=" ", timespec="seconds")
+    else:
+        data["created_at"] = getattr(msg, "date", datetime.now()).isoformat(sep=" ", timespec="seconds")
 
     old_id = data.pop("old_order_id", None)
     if old_id:
@@ -962,6 +967,7 @@ def _ensure_order_from_message(order_id: int, msg: types.Message) -> bool:
         "images": [],
         "current_group": status
     }
+    orders_data[order_id]["data"]["created_at"] = getattr(msg, "date", datetime.now()).isoformat(sep=" ", timespec="seconds")
     target_key = get_target_key(status)
     message_ids.setdefault(order_id, {})
     message_ids[order_id].setdefault(target_key, [])
@@ -1398,6 +1404,8 @@ def get_edit_options_kb(order_id: int) -> InlineKeyboardMarkup:
     kb.add(
         InlineKeyboardButton("👤 اسم الطفل", callback_data=f"field_name_{order_id}"),
         InlineKeyboardButton("📞 الهاتف", callback_data=f"field_phone_{order_id}"),
+        InlineKeyboardButton("✨ نوع الأوفر", callback_data=f"field_over_type_{order_id}"),
+        InlineKeyboardButton("🛏 نوع الملحف", callback_data=f"field_hand_type_{order_id}"),
         InlineKeyboardButton("💰 السعر", callback_data=f"field_price_{order_id}"),
         InlineKeyboardButton("📝 ملاحظات", callback_data=f"field_notes_{order_id}"),
         InlineKeyboardButton("❌ إلغاء", callback_data=f"cancel_edit_{order_id}")
@@ -1408,7 +1416,7 @@ def get_edit_options_kb(order_id: int) -> InlineKeyboardMarkup:
 @dp.message_handler(commands=['start'])
 async def cmd_start(msg: types.Message, state: FSMContext):
     await state.finish()
-    await msg.answer("👋 مرحباً!\n\n/start - الصفحة الرئيسية\n/new - إنشاء طلب جديد\n/cancel - إلغاء الطلب الحالي\n/download - تحميل ملف الطلبات الجاهزة")
+    await msg.answer("👋 مرحباً!\n\n/start - الصفحة الرئيسية\n/new - إنشاء طلب جديد\n/cancel - إلغاء الطلب الحالي\n/download - تحميل ملف الطلبات الجاهزة\n/stats_new YYYY-MM-DD - إحصائية يوم محدد")
 
 @dp.message_handler(commands=['new'])
 async def cmd_new(msg: types.Message, state: FSMContext):
@@ -1448,7 +1456,15 @@ async def cmd_download(msg: types.Message):
                     document=types.InputFile(file_path),
                     caption=f"📊 ملف الطلبات الجاهزة\n\n📦 عدد الطلبات: {len(ready_orders)}"
                 )
+
+            moved_count = 0
+            for order_id in ready_orders:
+                if await _transfer_order_to_status(order_id, "sent"):
+                    moved_count += 1
+
             await msg.answer("✅ تم إرسال الملف!")
+            if moved_count:
+                await msg.answer(f"✅ تم نقل {moved_count} طلب إلى تم الإرسال تلقائياً.")
             await msg.answer("🧹 إذا تريد تبدأ قائمة جاهز جديدة، اضغط الزر:", reply_markup=get_ready_export_kb())
         else:
             await msg.answer("❌ حدث خطأ في إنشاء الملف!")
@@ -1463,6 +1479,118 @@ async def cmd_rebuild_excel(msg: types.Message):
     count = rebuild_excel_from_orders()
     await msg.answer(f"✅ تم إعادة بناء ملف الإكسل ({count} طلب).")
 
+def _parse_stats_date(raw_text: str):
+    if not raw_text:
+        return None
+    value = normalize_digits(raw_text.strip())
+    value = re.sub(r"[\./]", "-", value)
+    value = re.sub(r"\s+", "", value)
+    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%Y%m%d", "%d%m%Y"):
+        try:
+            return datetime.strptime(value, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _order_created_date(order_info: dict):
+    created_at = (order_info.get("data", {}) or {}).get("created_at")
+    if not created_at:
+        return None
+    try:
+        return datetime.fromisoformat(str(created_at)).date()
+    except ValueError:
+        return None
+
+
+def _count_orders_for_date(target_date) -> dict:
+    counts = {
+        "total": 0,
+        "shafa": 0,
+        "set_tatreez_6": 0,
+        "print": 0,
+        "sport": 0,
+        "over": 0,
+        "hand": 0,
+        "dist": 0,
+        "sources": {source: 0 for source in sources_list},
+        "other_sources": {}
+    }
+
+    for order_info in orders_data.values():
+        order_date = _order_created_date(order_info)
+        if order_date != target_date:
+            continue
+
+        data = order_info.get("data", {}) or {}
+        counts["total"] += 1
+
+        source = data.get("source") or "غير محدد"
+        if source in counts["sources"]:
+            counts["sources"][source] += 1
+        else:
+            counts["other_sources"][source] = counts["other_sources"].get(source, 0) + 1
+
+        pieces = data.get("pieces", []) or []
+        order_type = data.get("order_type", "")
+
+        if "شفقة" in pieces:
+            counts["shafa"] += 1
+        if "سيت6" in pieces and order_type == "تطريز":
+            counts["set_tatreez_6"] += 1
+        if order_type == "طباعة":
+            counts["print"] += 1
+        if "سيت رياضي" in pieces:
+            counts["sport"] += 1
+        if "أوفر" in pieces or data.get("over_type"):
+            counts["over"] += 1
+        if "ملحف" in pieces or data.get("hand_type"):
+            counts["hand"] += 1
+        if "توزيعات" in pieces:
+            counts["dist"] += 1
+
+    return counts
+
+
+def _format_orders_stats_for_date(target_date) -> str:
+    counts = _count_orders_for_date(target_date)
+    lines = [
+        f"📊 إحصائية الطلبات ليوم {target_date.isoformat()}",
+        f"📦 العدد الكلي: {counts['total']}",
+        f"🧣 طلبات الشفقة: {counts['shafa']}",
+        f"🧵 طلبات سيت تطريز 6: {counts['set_tatreez_6']}",
+        f"🖨 طلبات الطباعة: {counts['print']}",
+        f"⚽ طلبات الرياضي: {counts['sport']}",
+        f"✨ طلبات الأوفر: {counts['over']}",
+        f"🛏 طلبات الملحف: {counts['hand']}",
+        f"🎉 طلبات التوزيعات: {counts['dist']}",
+        "",
+        "📱 حسب المصدر:"
+    ]
+
+    for source in sources_list:
+        lines.append(f"• {source}: {counts['sources'].get(source, 0)}")
+
+    for source, value in counts["other_sources"].items():
+        lines.append(f"• {source}: {value}")
+
+    return "\n".join(lines)
+
+
+@dp.message_handler(commands=['stats_new', 'stats'])
+async def cmd_stats_new(msg: types.Message):
+    parts = (msg.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await msg.answer("أرسل التاريخ بعد الأمر بهذا الشكل: /stats_new 2026-06-06")
+        return
+
+    target_date = _parse_stats_date(parts[1])
+    if not target_date:
+        await msg.answer("❌ التاريخ غير صحيح. استخدم مثلا: /stats_new 2026-06-06")
+        return
+
+    await msg.answer(_format_orders_stats_for_date(target_date))
+
 def _is_forwarded_message(msg: types.Message) -> bool:
     return any([
         msg.forward_from,
@@ -1473,6 +1601,70 @@ def _is_forwarded_message(msg: types.Message) -> bool:
 
 def _looks_like_order_text(text: str) -> bool:
     return "طلب #" in text and "اسم الطفل" in text
+
+
+async def _transfer_order_to_status(order_id: int, destination_status: str) -> bool:
+    if order_id not in orders_data:
+        return False
+
+    order_info = orders_data[order_id]
+    data = order_info["data"]
+    images_list = order_info["images"]
+    current_group = order_info["current_group"]
+
+    if current_group == destination_status:
+        return True
+
+    target = get_target(destination_status)
+    target_key = get_target_key(destination_status)
+    text = format_order_text(data, order_id, destination_status)
+    status_kb = get_status_buttons(order_id, destination_status)
+
+    current_target = get_target(current_group)
+    current_target_key = get_target_key(current_group)
+    target_send_kwargs = {}
+    if target["thread_id"]:
+        target_send_kwargs["message_thread_id"] = target["thread_id"]
+
+    try:
+        if order_id in message_ids and current_target_key in message_ids[order_id]:
+            for msg_id in message_ids[order_id][current_target_key]:
+                try:
+                    await bot.delete_message(chat_id=current_target["chat_id"], message_id=msg_id)
+                    print(f"✅ تم حذف الرسالة {msg_id}")
+                except Exception as e:
+                    print(f"⚠️ خطأ في حذف الرسالة {msg_id}: {e}")
+
+            del message_ids[order_id][current_target_key]
+    except Exception as e:
+        print(f"⚠️ خطأ في حذف الرسائل: {e}")
+
+    if images_list:
+        media = [InputMediaPhoto(media=i) for i in images_list]
+        msg_group = await bot.send_media_group(chat_id=target["chat_id"], media=media, **target_send_kwargs)
+        if order_id not in message_ids:
+            message_ids[order_id] = {}
+        if msg_group:
+            message_ids[order_id][target_key] = [m.message_id for m in msg_group]
+
+    msg_text = await _safe_send_message(
+        chat_id=target["chat_id"],
+        text=text,
+        reply_markup=status_kb,
+        **target_send_kwargs
+    )
+
+    if order_id not in message_ids:
+        message_ids[order_id] = {}
+    if target_key not in message_ids[order_id]:
+        message_ids[order_id][target_key] = []
+    message_ids[order_id][target_key].append(msg_text.message_id)
+
+    orders_data[order_id]["current_group"] = destination_status
+    if destination_status == "ready":
+        ready_exported_ids.discard(order_id)
+    save_runtime_state()
+    return True
 
 def _forward_cache_key(msg: types.Message) -> tuple:
     user_id = msg.from_user.id if msg.from_user else 0
@@ -2100,6 +2292,7 @@ async def _finalize_order(msg: types.Message, state: FSMContext):
         images_list = data.get("images", [])
 
         data["id"] = order_id
+        data["created_at"] = getattr(msg, "date", datetime.now()).isoformat(sep=" ", timespec="seconds")
 
         orders_data[order_id] = {
             "data": data,
@@ -2173,13 +2366,15 @@ async def edit_order_start(call: types.CallbackQuery, state: FSMContext):
 async def choose_field(call: types.CallbackQuery, state: FSMContext):
     """اختيار الحقل المراد تعديله"""
     try:
-        parts = call.data.split("_")
-        field_name = parts[1]
-        order_id = int(parts[2])
+        payload = call.data[len("field_"):]
+        field_name, order_id_raw = payload.rsplit("_", 1)
+        order_id = int(order_id_raw)
         
         field_display = {
             "name": "اسم الطفل",
             "phone": "الهاتف",
+            "over_type": "نوع الأوفر",
+            "hand_type": "نوع الملحف",
             "price": "السعر",
             "notes": "الملاحظات"
         }
@@ -2221,6 +2416,10 @@ async def save_edited_field(msg: types.Message, state: FSMContext):
                 await msg.answer("❌ السعر غير صحيح! حاول مرة أخرى:")
                 return
             new_value = normalized_price
+
+        if field_name in {"name", "notes", "over_type", "hand_type"} and not new_value:
+            await msg.answer("❌ القيمة لا يمكن أن تكون فارغة. حاول مرة أخرى:")
+            return
         
         # تحديث البيانات
         orders_data[order_id]["data"][field_name] = new_value
@@ -2380,70 +2579,16 @@ async def move_order(call: types.CallbackQuery):
                 await call.answer("❌ لم أجد الطلب!", show_alert=True)
                 return
 
-        order_info = orders_data[order_id]
-        data = order_info["data"]
-        images_list = order_info["images"]
-        current_group = order_info["current_group"]
-
         destination_status = target_group_name
         if target_group_name == "new":
-            destination_status = resolve_new_order_status(data)
+            destination_status = resolve_new_order_status(orders_data[order_id]["data"])
 
-        if current_group == destination_status:
+        if orders_data[order_id]["current_group"] == destination_status:
             await call.answer("🔔 موجود هنا!", show_alert=True)
             return
 
-        target = get_target(destination_status)
-        target_key = get_target_key(destination_status)
-        text = format_order_text(data, order_id, destination_status)
-        status_kb = get_status_buttons(order_id, destination_status)
-
-        current_target = get_target(current_group)
-        current_target_key = get_target_key(current_group)
-        target_send_kwargs = {}
-        if target["thread_id"]:
-            target_send_kwargs["message_thread_id"] = target["thread_id"]
-
-        # ✅ حذف جميع الرسائل من الكروب السابق
-        try:
-            if order_id in message_ids and current_target_key in message_ids[order_id]:
-                for msg_id in message_ids[order_id][current_target_key]:
-                    try:
-                        await bot.delete_message(chat_id=current_target["chat_id"], message_id=msg_id)
-                        print(f"✅ تم حذف الرسالة {msg_id}")
-                    except Exception as e:
-                        print(f"⚠️ خطأ في حذف الرسالة {msg_id}: {e}")
-                
-                del message_ids[order_id][current_target_key]
-        except Exception as e:
-            print(f"⚠️ خطأ في حذف الرسائل: {e}")
-
-        # أرسل للكروب الجديد
-        if images_list:
-            media = [InputMediaPhoto(media=i) for i in images_list]
-            msg_group = await bot.send_media_group(chat_id=target["chat_id"], media=media, **target_send_kwargs)
-            if order_id not in message_ids:
-                message_ids[order_id] = {}
-            if msg_group:
-                message_ids[order_id][target_key] = [m.message_id for m in msg_group]
-        
-        msg_text = await _safe_send_message(
-            chat_id=target["chat_id"], 
-            text=text, 
-            reply_markup=status_kb, 
-            **target_send_kwargs
-        )
-        
-        if order_id not in message_ids:
-            message_ids[order_id] = {}
-        if target_key not in message_ids[order_id]:
-            message_ids[order_id][target_key] = []
-        message_ids[order_id][target_key].append(msg_text.message_id)
-        
-        orders_data[order_id]["current_group"] = destination_status
-        if destination_status == "ready":
-            ready_exported_ids.discard(order_id)
-        save_runtime_state()
+        await call.answer("⏳ جاري نقل الطلب...", show_alert=False)
+        await _transfer_order_to_status(order_id, destination_status)
 
     except Exception as e:
         print(f"❌ خطأ: {e}")
@@ -2485,6 +2630,8 @@ if __name__ == "__main__":
             BotCommand("new", "طلب جديد"),
             BotCommand("cancel", "إلغاء الطلب الحالي"),
             BotCommand("download", "تحميل طلبات مجهز"),
+            BotCommand("stats_new", "إحصائية الطلبات حسب التاريخ"),
+            BotCommand("stats", "إحصائية الطلبات حسب التاريخ"),
             BotCommand("import_old", "استيراد طلبات قديمة"),
             BotCommand("rebuild_excel", "إعادة بناء ملف الإكسل")
         ]
