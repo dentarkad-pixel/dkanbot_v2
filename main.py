@@ -33,6 +33,19 @@ OLD_DATA_DIR = os.getenv("OLD_DATA_DIR", "")
 OLD_STATE_FILE = os.getenv("OLD_STATE_FILE", "")
 IMPORT_OLD_ON_START = os.getenv("IMPORT_OLD_ON_START", "0").strip().lower() in {"1", "true", "yes"}
 IMPORT_OLD_MODE = os.getenv("IMPORT_OLD_MODE", "new").strip().lower()
+# Minimum/start order id (set to 600 to resume from 600)
+# Use environment variable START_ORDER_ID to override, e.g. START_ORDER_ID=600
+def env_int_default(name: str, default: int):
+    try:
+        v = os.getenv(name)
+        if v is None or v.strip() == "":
+            return default
+        return int(v)
+    except Exception:
+        return default
+
+START_ORDER_ID = env_int_default("START_ORDER_ID", 1)
+RESET_NEXT_ON_START = os.getenv("RESET_NEXT_ON_START", "0").strip().lower() in {"1", "true", "yes"}
 
 ORDERS_FILE = os.path.join(DATA_DIR, "orders.xlsx")
 READY_FILE = os.path.join(DATA_DIR, "orders_ready_current.xlsx")
@@ -242,6 +255,19 @@ def load_runtime_state(file_name: str = STATE_FILE):
             next_order_id = saved_next_order_id
         else:
             next_order_id = max(orders_data.keys(), default=0) + 1
+
+        # Optionally force-reset next_order_id to START_ORDER_ID on startup.
+        if RESET_NEXT_ON_START:
+            # Force the next assigned id to START_ORDER_ID regardless of existing IDs
+            next_order_id = START_ORDER_ID
+
+        # Enforce minimum start id to avoid huge jumps from corrupted state files
+        try:
+            if START_ORDER_ID and isinstance(START_ORDER_ID, int):
+                if next_order_id < START_ORDER_ID:
+                    next_order_id = START_ORDER_ID
+        except Exception:
+            pass
         print(f"✅ تم تحميل حالة البوت: {len(orders_data)} طلب")
     except Exception as e:
         print(f"⚠️ تعذر تحميل حالة البوت: {e}")
@@ -728,8 +754,14 @@ def get_next_order_id(file_name: str = ORDERS_FILE):
     try:
         global next_order_id
         if next_order_id is None or next_order_id < 1:
-            ids = _collect_existing_order_ids(file_name)
-            next_order_id = max(ids) + 1 if ids else 1
+            if RESET_NEXT_ON_START:
+                next_order_id = START_ORDER_ID
+            else:
+                ids = _collect_existing_order_ids(file_name)
+                next_order_id = max(ids) + 1 if ids else START_ORDER_ID
+        # ensure we never go below the configured start id
+        if START_ORDER_ID and next_order_id < START_ORDER_ID:
+            next_order_id = START_ORDER_ID
         return next_order_id
     except Exception as e:
         print(f"❌ خطأ في تحديد رقم الطلب التالي: {e}")
@@ -739,7 +771,14 @@ async def reserve_next_order_id(file_name: str = ORDERS_FILE) -> int:
     global last_reserved_order_id, next_order_id
     async with order_id_lock:
         if next_order_id is None or next_order_id < 1:
-            next_order_id = max(_collect_existing_order_ids(file_name), default=0) + 1
+            if RESET_NEXT_ON_START:
+                next_order_id = START_ORDER_ID
+            else:
+                # Start from either existing max + 1, or configured START_ORDER_ID
+                next_order_id = max(_collect_existing_order_ids(file_name), default=START_ORDER_ID - 1) + 1
+        # Enforce minimum start id
+        if START_ORDER_ID and next_order_id < START_ORDER_ID:
+            next_order_id = START_ORDER_ID
         reserved_id = next_order_id
         next_order_id += 1
         last_reserved_order_id = reserved_id
