@@ -1434,17 +1434,127 @@ def get_ready_export_kb() -> InlineKeyboardMarkup:
 
 def get_edit_options_kb(order_id: int) -> InlineKeyboardMarkup:
     """لوحة مفاتيح خيارات التعديل"""
+    order_data = orders_data.get(order_id, {}).get("data", {}) or {}
     kb = InlineKeyboardMarkup(row_width=2)
-    kb.add(
+
+    buttons = [
         InlineKeyboardButton("👤 اسم الطفل", callback_data=f"field_name_{order_id}"),
         InlineKeyboardButton("📞 الهاتف", callback_data=f"field_phone_{order_id}"),
-        InlineKeyboardButton("✨ نوع الأوفر", callback_data=f"field_over_type_{order_id}"),
-        InlineKeyboardButton("🛏 نوع الملحف", callback_data=f"field_hand_type_{order_id}"),
+        InlineKeyboardButton("📱 المصدر", callback_data=f"field_source_{order_id}"),
+        InlineKeyboardButton("📍 المحافظة", callback_data=f"field_city_{order_id}"),
+        InlineKeyboardButton("🏘 المنطقة", callback_data=f"field_area_{order_id}"),
+        InlineKeyboardButton("🧵 نوع الطلب", callback_data=f"field_order_type_{order_id}"),
+    ]
+
+    if order_data.get("team") or order_data.get("sport_number") or order_data.get("sport_weight") or order_data.get("size"):
+        buttons.extend([
+            InlineKeyboardButton("⚽ الفريق", callback_data=f"field_team_{order_id}"),
+            InlineKeyboardButton("🔢 الرقم", callback_data=f"field_sport_number_{order_id}"),
+            InlineKeyboardButton("⚖️ وزن الطفل", callback_data=f"field_sport_weight_{order_id}"),
+            InlineKeyboardButton("📏 العمر/القياس", callback_data=f"field_size_{order_id}"),
+        ])
+
+    if order_data.get("over_type"):
+        buttons.append(InlineKeyboardButton("✨ نوع الأوفر", callback_data=f"field_over_type_{order_id}"))
+    if order_data.get("over_kind"):
+        buttons.append(InlineKeyboardButton("🎀 نوع الأوفر التفصيلي", callback_data=f"field_over_kind_{order_id}"))
+    if order_data.get("hand_type"):
+        buttons.append(InlineKeyboardButton("🛏 نوع الملحف", callback_data=f"field_hand_type_{order_id}"))
+    if order_data.get("scarf_owner"):
+        buttons.append(InlineKeyboardButton("🧣 صاحب الوشاح", callback_data=f"field_scarf_owner_{order_id}"))
+    if order_data.get("shafa_color"):
+        buttons.append(InlineKeyboardButton("🌈 لون الشفقة", callback_data=f"field_shafa_color_{order_id}"))
+    if order_data.get("box_color"):
+        buttons.append(InlineKeyboardButton("🎁 لون البوكس", callback_data=f"field_box_color_{order_id}"))
+    if order_data.get("box_wood_name"):
+        buttons.append(InlineKeyboardButton("🪵 اسم الخشب", callback_data=f"field_box_wood_name_{order_id}"))
+    if order_data.get("dist_count"):
+        buttons.append(InlineKeyboardButton("🎉 عدد التوزيعات", callback_data=f"field_dist_count_{order_id}"))
+    if order_data.get("dist_color"):
+        buttons.append(InlineKeyboardButton("🎨 لون التوزيعات", callback_data=f"field_dist_color_{order_id}"))
+
+    buttons.extend([
         InlineKeyboardButton("💰 السعر", callback_data=f"field_price_{order_id}"),
         InlineKeyboardButton("📝 ملاحظات", callback_data=f"field_notes_{order_id}"),
         InlineKeyboardButton("❌ إلغاء", callback_data=f"cancel_edit_{order_id}")
-    )
+    ])
+
+    kb.add(*buttons)
     return kb
+
+def _edit_field_keyboard(field_name: str) -> InlineKeyboardMarkup | None:
+    if field_name == "source":
+        return get_sources_kb()
+    if field_name == "city":
+        return get_cities_kb()
+    if field_name == "order_type":
+        return get_order_type_kb()
+    if field_name == "team":
+        return get_teams_kb()
+    if field_name == "over_type":
+        return get_over_type_kb()
+    if field_name == "over_kind":
+        return get_over_kind_kb()
+    if field_name == "hand_type":
+        return get_hand_type_kb()
+    if field_name == "scarf_owner":
+        return get_scarf_owner_kb()
+    if field_name == "box_color":
+        return get_box_color_kb()
+    if field_name == "size":
+        return get_size_kb()
+    return None
+
+def _normalize_edit_value(field_name: str, new_value: str) -> str:
+    if field_name == "phone":
+        return normalize_phone(new_value)
+    if field_name == "price":
+        return normalize_price(new_value)
+    if field_name in {"source", "city", "team", "order_type", "over_type", "over_kind", "hand_type", "scarf_owner", "shafa_color", "box_color", "box_wood_name", "dist_count", "dist_color", "sport_number", "sport_weight", "size", "name", "notes", "area"}:
+        return new_value.strip()
+    return new_value.strip()
+
+async def _apply_edited_field(order_id: int, field_name: str, new_value: str) -> bool:
+    if order_id not in orders_data:
+        return False
+
+    if field_name == "phone":
+        if not validate_phone(new_value):
+            return False
+    elif field_name == "price":
+        if not validate_price(new_value):
+            return False
+
+    if field_name in {"name", "phone", "source", "city", "area", "order_type", "team", "sport_number", "sport_weight", "over_type", "over_kind", "hand_type", "scarf_owner", "shafa_color", "box_color", "box_wood_name", "dist_count", "dist_color", "size", "price", "notes"} and not str(new_value).strip():
+        return False
+
+    orders_data[order_id]["data"][field_name] = new_value
+
+    current_group = orders_data[order_id]["current_group"]
+    current_target = get_target(current_group)
+    current_target_key = get_target_key(current_group)
+    text = format_order_text(orders_data[order_id]["data"], order_id, current_group)
+    status_kb = get_status_buttons(order_id, current_group)
+
+    try:
+        if order_id in message_ids and current_target_key in message_ids[order_id]:
+            for msg_id in reversed(message_ids[order_id][current_target_key]):
+                try:
+                    await _safe_edit_message_text(
+                        chat_id=current_target["chat_id"],
+                        message_id=msg_id,
+                        text=text,
+                        reply_markup=status_kb
+                    )
+                    break
+                except Exception as e:
+                    print(f"⚠️ خطأ في تحديث الرسالة {msg_id}: {e}")
+    except Exception as e:
+        print(f"⚠️ خطأ في تحديث الرسالة: {e}")
+
+    save_to_excel(orders_data[order_id]["data"], ORDERS_FILE)
+    save_runtime_state()
+    return True
 
 def _stats_matches_date(order_info: dict, target_date) -> bool:
     return _order_created_date(order_info) == target_date
@@ -1892,6 +2002,18 @@ def _looks_like_order_text(text: str) -> bool:
     return "طلب #" in text and "اسم الطفل" in text
 
 
+async def _delete_message_ids(chat_id: int, message_id_list: list[int]) -> list[int]:
+    remaining_ids = []
+    for msg_id in message_id_list:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+            print(f"✅ تم حذف الرسالة {msg_id}")
+        except Exception as e:
+            print(f"⚠️ خطأ في حذف الرسالة {msg_id}: {e}")
+            remaining_ids.append(msg_id)
+    return remaining_ids
+
+
 async def _transfer_order_to_status(order_id: int, destination_status: str) -> bool:
     if order_id not in orders_data:
         return False
@@ -1915,39 +2037,41 @@ async def _transfer_order_to_status(order_id: int, destination_status: str) -> b
     if target["thread_id"]:
         target_send_kwargs["message_thread_id"] = target["thread_id"]
 
+    sent_target_message_ids = []
     try:
-        if order_id in message_ids and current_target_key in message_ids[order_id]:
-            for msg_id in message_ids[order_id][current_target_key]:
-                try:
-                    await bot.delete_message(chat_id=current_target["chat_id"], message_id=msg_id)
-                    print(f"✅ تم حذف الرسالة {msg_id}")
-                except Exception as e:
-                    print(f"⚠️ خطأ في حذف الرسالة {msg_id}: {e}")
+        if images_list:
+            media = [InputMediaPhoto(media=i) for i in images_list]
+            msg_group = await bot.send_media_group(chat_id=target["chat_id"], media=media, **target_send_kwargs)
+            if msg_group:
+                sent_target_message_ids.extend([m.message_id for m in msg_group])
 
-            del message_ids[order_id][current_target_key]
+        msg_text = await _safe_send_message(
+            chat_id=target["chat_id"],
+            text=text,
+            reply_markup=status_kb,
+            **target_send_kwargs
+        )
+        sent_target_message_ids.append(msg_text.message_id)
     except Exception as e:
-        print(f"⚠️ خطأ في حذف الرسائل: {e}")
-
-    if images_list:
-        media = [InputMediaPhoto(media=i) for i in images_list]
-        msg_group = await bot.send_media_group(chat_id=target["chat_id"], media=media, **target_send_kwargs)
-        if order_id not in message_ids:
-            message_ids[order_id] = {}
-        if msg_group:
-            message_ids[order_id][target_key] = [m.message_id for m in msg_group]
-
-    msg_text = await _safe_send_message(
-        chat_id=target["chat_id"],
-        text=text,
-        reply_markup=status_kb,
-        **target_send_kwargs
-    )
+        print(f"⚠️ خطأ في نقل الطلب #{order_id} إلى {destination_status}: {e}")
+        for msg_id in sent_target_message_ids:
+            try:
+                await bot.delete_message(chat_id=target["chat_id"], message_id=msg_id)
+            except Exception as rollback_error:
+                print(f"⚠️ خطأ في التراجع عن الرسالة {msg_id}: {rollback_error}")
+        return False
 
     if order_id not in message_ids:
         message_ids[order_id] = {}
-    if target_key not in message_ids[order_id]:
-        message_ids[order_id][target_key] = []
-    message_ids[order_id][target_key].append(msg_text.message_id)
+    message_ids[order_id][target_key] = sent_target_message_ids
+
+    source_message_ids = list(message_ids[order_id].get(current_target_key, []))
+    if source_message_ids:
+        remaining_source_ids = await _delete_message_ids(current_target["chat_id"], source_message_ids)
+        if remaining_source_ids:
+            message_ids[order_id][current_target_key] = remaining_source_ids
+        elif current_target_key in message_ids[order_id]:
+            del message_ids[order_id][current_target_key]
 
     orders_data[order_id]["current_group"] = destination_status
     if destination_status == "ready":
@@ -2662,18 +2786,143 @@ async def choose_field(call: types.CallbackQuery, state: FSMContext):
         field_display = {
             "name": "اسم الطفل",
             "phone": "الهاتف",
+            "source": "المصدر",
+            "city": "المحافظة",
+            "area": "المنطقة",
+            "order_type": "نوع الطلب",
+            "team": "الفريق",
+            "sport_number": "الرقم",
+            "sport_weight": "وزن الطفل",
+            "size": "العمر/القياس",
             "over_type": "نوع الأوفر",
+            "over_kind": "نوع الأوفر التفصيلي",
             "hand_type": "نوع الملحف",
+            "scarf_owner": "صاحب الوشاح",
+            "shafa_color": "لون الشفقة",
+            "box_color": "لون البوكس",
+            "box_wood_name": "اسم الخشب",
+            "dist_count": "عدد التوزيعات",
+            "dist_color": "لون التوزيعات",
             "price": "السعر",
             "notes": "الملاحظات"
         }
         
         await state.update_data(edit_order_id=order_id, edit_field=field_name)
-        await call.message.answer(f"✏️ اكتب القيمة الجديدة للـ {field_display.get(field_name, field_name)}:")
+        field_kb = _edit_field_keyboard(field_name)
+        if field_kb:
+            await call.message.answer(f"✏️ اختر القيمة الجديدة للـ {field_display.get(field_name, field_name)}:", reply_markup=field_kb)
+        else:
+            await call.message.answer(f"✏️ اكتب القيمة الجديدة للـ {field_display.get(field_name, field_name)}:")
         await EditOrderState.editing_field.set()
     except Exception as e:
         print(f"❌ خطأ في choose_field: {e}")
         await call.answer(f"❌ خطأ: {str(e)}", show_alert=True)
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("source_"), state=EditOrderState.editing_field)
+async def edit_source_choice(call: types.CallbackQuery, state: FSMContext):
+    source = call.data.replace("source_", "")
+    data = await state.get_data()
+    await call.answer()
+    if await _apply_edited_field(data.get("edit_order_id"), data.get("edit_field"), source):
+        await call.message.answer("✅ تم تحديث المصدر.")
+        await state.finish()
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("city_"), state=EditOrderState.editing_field)
+async def edit_city_choice(call: types.CallbackQuery, state: FSMContext):
+    city = call.data.replace("city_", "")
+    data = await state.get_data()
+    await call.answer()
+    if await _apply_edited_field(data.get("edit_order_id"), data.get("edit_field"), city):
+        await call.message.answer("✅ تم تحديث المحافظة.")
+        await state.finish()
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("type_"), state=EditOrderState.editing_field)
+async def edit_order_type_choice(call: types.CallbackQuery, state: FSMContext):
+    order_type = "طباعة" if call.data == "type_print" else "تطريز"
+    data = await state.get_data()
+    await call.answer()
+    if await _apply_edited_field(data.get("edit_order_id"), data.get("edit_field"), order_type):
+        await call.message.answer("✅ تم تحديث نوع الطلب.")
+        await state.finish()
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("team_"), state=EditOrderState.editing_field)
+async def edit_team_choice(call: types.CallbackQuery, state: FSMContext):
+    team_value = call.data.replace("team_", "")
+    data = await state.get_data()
+    if team_value == "other":
+        await call.answer()
+        await state.update_data(edit_waiting_custom_field="team")
+        await call.message.answer("✍️ اكتب اسم الفريق الجديد:")
+        return
+    await call.answer()
+    if await _apply_edited_field(data.get("edit_order_id"), data.get("edit_field"), team_value):
+        await call.message.answer("✅ تم تحديث الفريق.")
+        await state.finish()
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("over_") and not c.data.startswith("over_kind_"), state=EditOrderState.editing_field)
+async def edit_over_choice(call: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    field_name = data.get("edit_field")
+    value = call.data.replace("over_", "")
+    await call.answer()
+    if await _apply_edited_field(data.get("edit_order_id"), field_name, value):
+        await call.message.answer("✅ تم تحديث نوع الأوفر.")
+        await state.finish()
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("over_kind_"), state=EditOrderState.editing_field)
+async def edit_over_kind_choice(call: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    value = call.data.replace("over_kind_", "")
+    await call.answer()
+    if await _apply_edited_field(data.get("edit_order_id"), data.get("edit_field"), value):
+        await call.message.answer("✅ تم تحديث نوع الأوفر التفصيلي.")
+        await state.finish()
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("hand_"), state=EditOrderState.editing_field)
+async def edit_hand_choice(call: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    value = call.data.replace("hand_", "")
+    await call.answer()
+    if await _apply_edited_field(data.get("edit_order_id"), data.get("edit_field"), value):
+        await call.message.answer("✅ تم تحديث نوع الملحف.")
+        await state.finish()
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("scarf_"), state=EditOrderState.editing_field)
+async def edit_scarf_choice(call: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    value = call.data.replace("scarf_", "")
+    await call.answer()
+    if await _apply_edited_field(data.get("edit_order_id"), data.get("edit_field"), value):
+        await call.message.answer("✅ تم تحديث صاحب الوشاح.")
+        await state.finish()
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("box_"), state=EditOrderState.editing_field)
+async def edit_box_choice(call: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    value = call.data.replace("box_", "")
+    await call.answer()
+    if await _apply_edited_field(data.get("edit_order_id"), data.get("edit_field"), value):
+        await call.message.answer("✅ تم تحديث لون البوكس.")
+        await state.finish()
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("size_"), state=EditOrderState.editing_field)
+async def edit_size_choice(call: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    value = call.data.replace("size_", "")
+    await call.answer()
+    if await _apply_edited_field(data.get("edit_order_id"), data.get("edit_field"), value):
+        await call.message.answer("✅ تم تحديث العمر/القياس.")
+        await state.finish()
 
 @dp.message_handler(state=EditOrderState.editing_field)
 async def save_edited_field(msg: types.Message, state: FSMContext):
@@ -2706,7 +2955,7 @@ async def save_edited_field(msg: types.Message, state: FSMContext):
                 return
             new_value = normalized_price
 
-        if field_name in {"name", "notes", "over_type", "hand_type"} and not new_value:
+        if field_name in {"name", "notes", "source", "city", "area", "order_type", "team", "sport_number", "sport_weight", "size", "over_type", "over_kind", "hand_type", "scarf_owner", "shafa_color", "box_color", "box_wood_name", "dist_count", "dist_color"} and not new_value:
             await msg.answer("❌ القيمة لا يمكن أن تكون فارغة. حاول مرة أخرى:")
             return
         
@@ -2817,37 +3066,41 @@ async def _move_order_to_status(order_id: int, destination_status: str) -> bool:
     if target["thread_id"]:
         target_send_kwargs["message_thread_id"] = target["thread_id"]
 
+    sent_target_message_ids = []
     try:
-        if order_id in message_ids and current_target_key in message_ids[order_id]:
-            for msg_id in message_ids[order_id][current_target_key]:
-                try:
-                    await bot.delete_message(chat_id=current_target["chat_id"], message_id=msg_id)
-                except Exception as e:
-                    print(f"⚠️ خطأ في حذف الرسالة {msg_id}: {e}")
-            del message_ids[order_id][current_target_key]
+        if images_list:
+            media = [InputMediaPhoto(media=i) for i in images_list]
+            msg_group = await bot.send_media_group(chat_id=target["chat_id"], media=media, **target_send_kwargs)
+            if msg_group:
+                sent_target_message_ids.extend([m.message_id for m in msg_group])
+
+        msg_text = await _safe_send_message(
+            chat_id=target["chat_id"],
+            text=text,
+            reply_markup=status_kb,
+            **target_send_kwargs
+        )
+        sent_target_message_ids.append(msg_text.message_id)
     except Exception as e:
-        print(f"⚠️ خطأ في حذف الرسائل: {e}")
-
-    if images_list:
-        media = [InputMediaPhoto(media=i) for i in images_list]
-        msg_group = await bot.send_media_group(chat_id=target["chat_id"], media=media, **target_send_kwargs)
-        if order_id not in message_ids:
-            message_ids[order_id] = {}
-        if msg_group:
-            message_ids[order_id][target_key] = [m.message_id for m in msg_group]
-
-    msg_text = await _safe_send_message(
-        chat_id=target["chat_id"],
-        text=text,
-        reply_markup=status_kb,
-        **target_send_kwargs
-    )
+        print(f"⚠️ خطأ في نقل الطلب #{order_id} إلى {destination_status}: {e}")
+        for msg_id in sent_target_message_ids:
+            try:
+                await bot.delete_message(chat_id=target["chat_id"], message_id=msg_id)
+            except Exception as rollback_error:
+                print(f"⚠️ خطأ في التراجع عن الرسالة {msg_id}: {rollback_error}")
+        return False
 
     if order_id not in message_ids:
         message_ids[order_id] = {}
-    if target_key not in message_ids[order_id]:
-        message_ids[order_id][target_key] = []
-    message_ids[order_id][target_key].append(msg_text.message_id)
+    message_ids[order_id][target_key] = sent_target_message_ids
+
+    source_message_ids = list(message_ids[order_id].get(current_target_key, []))
+    if source_message_ids:
+        remaining_source_ids = await _delete_message_ids(current_target["chat_id"], source_message_ids)
+        if remaining_source_ids:
+            message_ids[order_id][current_target_key] = remaining_source_ids
+        elif current_target_key in message_ids[order_id]:
+            del message_ids[order_id][current_target_key]
 
     orders_data[order_id]["current_group"] = destination_status
     if destination_status == "ready":
