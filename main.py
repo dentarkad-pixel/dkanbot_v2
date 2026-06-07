@@ -11,7 +11,7 @@ from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from openpyxl import Workbook, load_workbook
-from datetime import datetime
+from datetime import datetime, timedelta
 # ================= TOKEN & GROUPS =================
 API_TOKEN = os.getenv("BOT_TOKEN")
 if not API_TOKEN:
@@ -177,6 +177,7 @@ imported_order_ids = set()
 ready_exported_ids = set()
 order_id_lock = asyncio.Lock()
 last_reserved_order_id = None
+next_order_id = None
 forwarded_media_cache = {}
 forwarded_text_cache = {}
 forwarded_photo_cache = {}
@@ -216,7 +217,8 @@ def save_runtime_state(file_name: str = STATE_FILE):
             "orders_data": {str(k): v for k, v in orders_data.items()},
             "message_ids": _encode_message_ids(message_ids),
             "imported_order_ids": sorted(imported_order_ids),
-            "ready_exported_ids": sorted(ready_exported_ids)
+            "ready_exported_ids": sorted(ready_exported_ids),
+            "next_order_id": next_order_id
         }
         with open(file_name, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False)
@@ -224,7 +226,7 @@ def save_runtime_state(file_name: str = STATE_FILE):
         print(f"⚠️ تعذر حفظ حالة البوت: {e}")
 
 def load_runtime_state(file_name: str = STATE_FILE):
-    global orders_data, message_ids, imported_order_ids, ready_exported_ids
+    global orders_data, message_ids, imported_order_ids, ready_exported_ids, next_order_id
     try:
         ensure_data_dir()
         if not os.path.exists(file_name):
@@ -235,6 +237,11 @@ def load_runtime_state(file_name: str = STATE_FILE):
         message_ids = _decode_message_ids(payload.get("message_ids", {}))
         imported_order_ids = set(int(x) for x in payload.get("imported_order_ids", []))
         ready_exported_ids = set(int(x) for x in payload.get("ready_exported_ids", []))
+        saved_next_order_id = payload.get("next_order_id")
+        if isinstance(saved_next_order_id, int) and saved_next_order_id > 0:
+            next_order_id = saved_next_order_id
+        else:
+            next_order_id = max(orders_data.keys(), default=0) + 1
         print(f"✅ تم تحميل حالة البوت: {len(orders_data)} طلب")
     except Exception as e:
         print(f"⚠️ تعذر تحميل حالة البوت: {e}")
@@ -275,6 +282,14 @@ class OrderState(StatesGroup):
 class EditOrderState(StatesGroup):
     waiting_for_field_choice = State()
     editing_field = State()
+
+class StatsNewState(StatesGroup):
+    waiting_for_date = State()
+
+class StatsState(StatesGroup):
+    waiting_for_source = State()
+    waiting_for_period = State()
+    waiting_for_manual_date = State()
 
 # ================= EXCEL FUNCTIONS =================
 EXCEL_HEADER_ROW = [
@@ -711,20 +726,24 @@ def _collect_existing_order_ids(file_name: str = ORDERS_FILE) -> set:
 def get_next_order_id(file_name: str = ORDERS_FILE):
     """احصل على رقم الطلب التالي بدون تكرار"""
     try:
-        ids = _collect_existing_order_ids(file_name)
-        return max(ids) + 1 if ids else 1
+        global next_order_id
+        if next_order_id is None or next_order_id < 1:
+            ids = _collect_existing_order_ids(file_name)
+            next_order_id = max(ids) + 1 if ids else 1
+        return next_order_id
     except Exception as e:
         print(f"❌ خطأ في تحديد رقم الطلب التالي: {e}")
         return 1
 
 async def reserve_next_order_id(file_name: str = ORDERS_FILE) -> int:
-    global last_reserved_order_id
+    global last_reserved_order_id, next_order_id
     async with order_id_lock:
-        if last_reserved_order_id is None:
-            ids = _collect_existing_order_ids(file_name)
-            last_reserved_order_id = max(ids) if ids else 0
-        last_reserved_order_id += 1
-        return last_reserved_order_id
+        if next_order_id is None or next_order_id < 1:
+            next_order_id = max(_collect_existing_order_ids(file_name), default=0) + 1
+        reserved_id = next_order_id
+        next_order_id += 1
+        last_reserved_order_id = reserved_id
+        return reserved_id
 
 def save_to_excel(data, file_name: str = ORDERS_FILE):
     """احفظ الطلب في ملف Excel"""
@@ -1111,12 +1130,12 @@ cities_list = [
 ]
 
 sources_list = [
-    "تيليجرام",
-    "انستغرام",
+    "انستا امير واميرة",
+    "انستا دكان",
     "واتساب",
-    "فيسبوك",
-    "معرض",
-    "اخرى"
+    "فيسبوك امير واميرة",
+    "فيسبوك دكان",
+    "تيكتوك"
 ]
 
 def get_cities_kb() -> InlineKeyboardMarkup:
@@ -1130,6 +1149,21 @@ def get_sources_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup(row_width=2)
     for source in sources_list:
         kb.insert(InlineKeyboardButton(f"📱 {source}", callback_data=f"source_{source}"))
+    return kb
+
+def get_stats_sources_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardMarkup(row_width=2)
+    for index, source in enumerate(sources_list):
+        kb.insert(InlineKeyboardButton(f"📱 {source}", callback_data=f"stats_source_{index}"))
+    return kb
+
+def get_stats_period_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardMarkup(row_width=1)
+    kb.add(
+        InlineKeyboardButton("📅 آخر أسبوع", callback_data="stats_period_week"),
+        InlineKeyboardButton("🗓 آخر شهر", callback_data="stats_period_month"),
+        InlineKeyboardButton("✍️ إدخال تاريخ", callback_data="stats_period_manual")
+    )
     return kb
 
 def get_order_type_kb() -> InlineKeyboardMarkup:
@@ -1412,11 +1446,143 @@ def get_edit_options_kb(order_id: int) -> InlineKeyboardMarkup:
     )
     return kb
 
+def _stats_matches_date(order_info: dict, target_date) -> bool:
+    return _order_created_date(order_info) == target_date
+
+def _stats_matches_range(order_info: dict, start_date, end_date, source: str = None) -> bool:
+    order_date = _order_created_date(order_info)
+    if not order_date or order_date < start_date or order_date > end_date:
+        return False
+    if source is None:
+        return True
+    return (order_info.get("data", {}) or {}).get("source") == source
+
+def _classify_order_for_stats(data: dict) -> str:
+    pieces = data.get("pieces", []) or []
+    order_type = data.get("order_type", "")
+
+    if "شفقة" in pieces:
+        return "shafa"
+    if "سيت6" in pieces and order_type == "تطريز":
+        return "set6_tatreez"
+    if "سيت3" in pieces and order_type == "تطريز":
+        return "set3_tatreez"
+    if "سيت6" in pieces and order_type == "طباعة":
+        return "set6_print"
+    if "سيت3" in pieces and order_type == "طباعة":
+        return "set3_print"
+    if "سيت رياضي" in pieces:
+        return "sport"
+    return "other"
+
+def _count_orders_for_date(target_date) -> dict:
+    counts = {
+        "total": 0,
+        "shafa": 0,
+        "set6_tatreez": 0,
+        "set3_tatreez": 0,
+        "set6_print": 0,
+        "set3_print": 0,
+        "sport": 0,
+        "other": 0,
+        "sources": {source: 0 for source in sources_list},
+        "other_sources": {}
+    }
+
+    for order_info in orders_data.values():
+        if not _stats_matches_date(order_info, target_date):
+            continue
+
+        data = order_info.get("data", {}) or {}
+        counts["total"] += 1
+
+        source = data.get("source") or "غير محدد"
+        if source in counts["sources"]:
+            counts["sources"][source] += 1
+        else:
+            counts["other_sources"][source] = counts["other_sources"].get(source, 0) + 1
+
+        bucket = _classify_order_for_stats(data)
+        counts[bucket] += 1
+
+    return counts
+
+def _count_orders_for_range(start_date, end_date, source: str = None) -> dict:
+    counts = {
+        "total": 0,
+        "shafa": 0,
+        "set6_tatreez": 0,
+        "set3_tatreez": 0,
+        "set6_print": 0,
+        "set3_print": 0,
+        "sport": 0,
+        "other": 0,
+    }
+
+    for order_info in orders_data.values():
+        if not _stats_matches_range(order_info, start_date, end_date, source=source):
+            continue
+
+        data = order_info.get("data", {}) or {}
+        counts["total"] += 1
+        bucket = _classify_order_for_stats(data)
+        counts[bucket] += 1
+
+    return counts
+
+def _parse_stats_period(period_key: str):
+    today = datetime.now().date()
+    if period_key == "week":
+        return today, today.replace(day=today.day) if False else None
+    if period_key == "month":
+        return today, None
+    return None, None
+
+def _format_orders_stats_for_date(target_date) -> str:
+    counts = _count_orders_for_date(target_date)
+    lines = [
+        f"📊 إحصائية الطلبات ليوم {target_date.isoformat()}",
+        f"📦 العدد الكلي: {counts['total']}",
+        f"🧣 الشفقات: {counts['shafa']}",
+        f"🧵 سيت 6 تطريز: {counts['set6_tatreez']}",
+        f"🧵 سيت 3 تطريز: {counts['set3_tatreez']}",
+        f"🖨 سيت 6 طباعة: {counts['set6_print']}",
+        f"🖨 سيت 3 طباعة: {counts['set3_print']}",
+        f"⚽ سيت رياضي: {counts['sport']}",
+        f"📦 اخرى: {counts['other']}",
+        "",
+        "📱 المصادر:"
+    ]
+
+    for source in sources_list:
+        lines.append(f"• {source}: {counts['sources'].get(source, 0)}")
+
+    for source, value in counts["other_sources"].items():
+        lines.append(f"• {source}: {value}")
+
+    return "\n".join(lines)
+
+def _format_source_stats(source: str, start_date, end_date, label: str) -> str:
+    counts = _count_orders_for_range(start_date, end_date, source=source)
+    lines = [
+        f"📊 إحصائية {source}",
+        f"📅 الفترة: {label}",
+        f"📦 العدد الكلي: {counts['total']}",
+        f"🧣 الشفقات: {counts['shafa']}",
+        f"🧵 سيت 6 تطريز: {counts['set6_tatreez']}",
+        f"🧵 سيت 3 تطريز: {counts['set3_tatreez']}",
+        f"🖨 سيت 6 طباعة: {counts['set6_print']}",
+        f"🖨 سيت 3 طباعة: {counts['set3_print']}",
+        f"⚽ سيت رياضي: {counts['sport']}",
+        f"📦 اخرى: {counts['other']}"
+    ]
+    return "\n".join(lines)
+
 # ================= HANDLERS =================
 @dp.message_handler(commands=['start'])
 async def cmd_start(msg: types.Message, state: FSMContext):
     await state.finish()
-    await msg.answer("👋 مرحباً!\n\n/start - الصفحة الرئيسية\n/new - إنشاء طلب جديد\n/cancel - إلغاء الطلب الحالي\n/download - تحميل ملف الطلبات الجاهزة\n/stats_new YYYY-MM-DD - إحصائية يوم محدد")
+    await msg.answer("👋 مرحباً!\n\n/start - الصفحة الرئيسية\n/new - إنشاء طلب جديد\n/cancel - إلغاء الطلب الحالي\n/download - تحميل ملف الطلبات الجاهزة\n/stats_new - إحصائية يوم محدد\n/stats - إحصائية حسب المصدر والفترة")
 
 @dp.message_handler(commands=['new'])
 async def cmd_new(msg: types.Message, state: FSMContext):
@@ -1503,23 +1669,41 @@ def _order_created_date(order_info: dict):
         return None
 
 
+def _classify_order_for_stats(data: dict) -> str:
+    pieces = data.get("pieces", []) or []
+    order_type = data.get("order_type", "")
+
+    if "شفقة" in pieces:
+        return "shafa"
+    if "سيت6" in pieces and order_type == "تطريز":
+        return "set6_tatreez"
+    if "سيت3" in pieces and order_type == "تطريز":
+        return "set3_tatreez"
+    if "سيت6" in pieces and order_type == "طباعة":
+        return "set6_print"
+    if "سيت3" in pieces and order_type == "طباعة":
+        return "set3_print"
+    if "سيت رياضي" in pieces:
+        return "sport"
+    return "other"
+
+
 def _count_orders_for_date(target_date) -> dict:
     counts = {
         "total": 0,
         "shafa": 0,
-        "set_tatreez_6": 0,
-        "print": 0,
+        "set6_tatreez": 0,
+        "set3_tatreez": 0,
+        "set6_print": 0,
+        "set3_print": 0,
         "sport": 0,
-        "over": 0,
-        "hand": 0,
-        "dist": 0,
+        "other": 0,
         "sources": {source: 0 for source in sources_list},
         "other_sources": {}
     }
 
     for order_info in orders_data.values():
-        order_date = _order_created_date(order_info)
-        if order_date != target_date:
+        if _order_created_date(order_info) != target_date:
             continue
 
         data = order_info.get("data", {}) or {}
@@ -1531,23 +1715,33 @@ def _count_orders_for_date(target_date) -> dict:
         else:
             counts["other_sources"][source] = counts["other_sources"].get(source, 0) + 1
 
-        pieces = data.get("pieces", []) or []
-        order_type = data.get("order_type", "")
+        counts[_classify_order_for_stats(data)] += 1
 
-        if "شفقة" in pieces:
-            counts["shafa"] += 1
-        if "سيت6" in pieces and order_type == "تطريز":
-            counts["set_tatreez_6"] += 1
-        if order_type == "طباعة":
-            counts["print"] += 1
-        if "سيت رياضي" in pieces:
-            counts["sport"] += 1
-        if "أوفر" in pieces or data.get("over_type"):
-            counts["over"] += 1
-        if "ملحف" in pieces or data.get("hand_type"):
-            counts["hand"] += 1
-        if "توزيعات" in pieces:
-            counts["dist"] += 1
+    return counts
+
+
+def _count_orders_for_range(start_date, end_date, source: str = None) -> dict:
+    counts = {
+        "total": 0,
+        "shafa": 0,
+        "set6_tatreez": 0,
+        "set3_tatreez": 0,
+        "set6_print": 0,
+        "set3_print": 0,
+        "sport": 0,
+        "other": 0,
+    }
+
+    for order_info in orders_data.values():
+        order_date = _order_created_date(order_info)
+        if not order_date or order_date < start_date or order_date > end_date:
+            continue
+        data = order_info.get("data", {}) or {}
+        if source is not None and (data.get("source") or "غير محدد") != source:
+            continue
+
+        counts["total"] += 1
+        counts[_classify_order_for_stats(data)] += 1
 
     return counts
 
@@ -1557,15 +1751,15 @@ def _format_orders_stats_for_date(target_date) -> str:
     lines = [
         f"📊 إحصائية الطلبات ليوم {target_date.isoformat()}",
         f"📦 العدد الكلي: {counts['total']}",
-        f"🧣 طلبات الشفقة: {counts['shafa']}",
-        f"🧵 طلبات سيت تطريز 6: {counts['set_tatreez_6']}",
-        f"🖨 طلبات الطباعة: {counts['print']}",
-        f"⚽ طلبات الرياضي: {counts['sport']}",
-        f"✨ طلبات الأوفر: {counts['over']}",
-        f"🛏 طلبات الملحف: {counts['hand']}",
-        f"🎉 طلبات التوزيعات: {counts['dist']}",
+        f"🧣 الشفقات: {counts['shafa']}",
+        f"🧵 سيت 6 تطريز: {counts['set6_tatreez']}",
+        f"🧵 سيت 3 تطريز: {counts['set3_tatreez']}",
+        f"🖨 سيت 3 طباعة: {counts['set3_print']}",
+        f"🖨 سيت 6 طباعة: {counts['set6_print']}",
+        f"⚽ سيت رياضي: {counts['sport']}",
+        f"📦 اخرى: {counts['other']}",
         "",
-        "📱 حسب المصدر:"
+        "📱 المصادر:"
     ]
 
     for source in sources_list:
@@ -1577,19 +1771,114 @@ def _format_orders_stats_for_date(target_date) -> str:
     return "\n".join(lines)
 
 
-@dp.message_handler(commands=['stats_new', 'stats'])
-async def cmd_stats_new(msg: types.Message):
-    parts = (msg.text or "").split(maxsplit=1)
-    if len(parts) < 2:
-        await msg.answer("أرسل التاريخ بعد الأمر بهذا الشكل: /stats_new 2026-06-06")
-        return
+def _format_source_stats(source: str, start_date, end_date, label: str) -> str:
+    counts = _count_orders_for_range(start_date, end_date, source=source)
+    return "\n".join([
+        f"📊 إحصائية {source}",
+        f"📅 الفترة: {label}",
+        f"📦 العدد الكلي: {counts['total']}",
+        f"🧣 الشفقات: {counts['shafa']}",
+        f"🧵 سيت 6 تطريز: {counts['set6_tatreez']}",
+        f"🧵 سيت 3 تطريز: {counts['set3_tatreez']}",
+        f"🖨 سيت 3 طباعة: {counts['set3_print']}",
+        f"🖨 سيت 6 طباعة: {counts['set6_print']}",
+        f"⚽ سيت رياضي: {counts['sport']}",
+        f"📦 اخرى: {counts['other']}"
+    ])
 
-    target_date = _parse_stats_date(parts[1])
+
+def _range_for_period(period_key: str):
+    today = datetime.now().date()
+    if period_key == "week":
+        start_date = today - timedelta(days=6)
+        return start_date, today, "آخر أسبوع"
+    if period_key == "month":
+        start_date = today - timedelta(days=29)
+        return start_date, today, "آخر شهر"
+    return None, None, ""
+
+
+@dp.message_handler(commands=['stats_new'])
+async def cmd_stats_new(msg: types.Message, state: FSMContext):
+    await state.finish()
+    await msg.answer("📅 ارسل تاريخ اليوم المطلوب بصيغة dd/mm/yyyy أو dd-mm-yyyy:")
+    await StatsNewState.waiting_for_date.set()
+
+
+@dp.message_handler(state=StatsNewState.waiting_for_date)
+async def process_stats_new_date(msg: types.Message, state: FSMContext):
+    target_date = _parse_stats_date((msg.text or "").strip())
     if not target_date:
-        await msg.answer("❌ التاريخ غير صحيح. استخدم مثلا: /stats_new 2026-06-06")
+        await msg.answer("❌ التاريخ غير صحيح. استخدم مثل 06/06/2026 أو 06-06-2026")
         return
 
     await msg.answer(_format_orders_stats_for_date(target_date))
+    await state.finish()
+
+
+@dp.message_handler(commands=['stats'])
+async def cmd_stats(msg: types.Message, state: FSMContext):
+    await state.finish()
+    await msg.answer("📱 اختر المصدر أولاً:", reply_markup=get_stats_sources_kb())
+    await StatsState.waiting_for_source.set()
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("stats_source_"), state=StatsState.waiting_for_source)
+async def process_stats_source(call: types.CallbackQuery, state: FSMContext):
+    try:
+        source_index = int(call.data.replace("stats_source_", ""))
+        source = sources_list[source_index]
+    except Exception:
+        await call.answer("❌ مصدر غير صحيح", show_alert=True)
+        return
+
+    await state.update_data(stats_source=source)
+    await call.answer()
+    await call.message.answer("📆 اختر الفترة:", reply_markup=get_stats_period_kb())
+    await StatsState.waiting_for_period.set()
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("stats_period_"), state=StatsState.waiting_for_period)
+async def process_stats_period(call: types.CallbackQuery, state: FSMContext):
+    period_key = call.data.replace("stats_period_", "")
+    data = await state.get_data()
+    source = data.get("stats_source")
+    if not source:
+        await call.answer("❌ لم يتم تحديد المصدر", show_alert=True)
+        return
+
+    if period_key == "manual":
+        await call.answer()
+        await call.message.answer("📅 ارسل التاريخ بصيغة dd/mm/yyyy أو dd-mm-yyyy:")
+        await StatsState.waiting_for_manual_date.set()
+        return
+
+    start_date, end_date, label = _range_for_period(period_key)
+    if not start_date:
+        await call.answer("❌ الفترة غير صحيحة", show_alert=True)
+        return
+
+    await call.answer()
+    await call.message.answer(_format_source_stats(source, start_date, end_date, label))
+    await state.finish()
+
+
+@dp.message_handler(state=StatsState.waiting_for_manual_date)
+async def process_stats_manual_date(msg: types.Message, state: FSMContext):
+    target_date = _parse_stats_date((msg.text or "").strip())
+    if not target_date:
+        await msg.answer("❌ التاريخ غير صحيح. استخدم مثل 06/06/2026 أو 06-06-2026")
+        return
+
+    data = await state.get_data()
+    source = data.get("stats_source")
+    if not source:
+        await msg.answer("❌ لم يتم تحديد المصدر.")
+        await state.finish()
+        return
+
+    await msg.answer(_format_source_stats(source, target_date, target_date, target_date.isoformat()))
+    await state.finish()
 
 def _is_forwarded_message(msg: types.Message) -> bool:
     return any([
