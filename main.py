@@ -1192,6 +1192,7 @@ def get_sources_kb() -> InlineKeyboardMarkup:
 
 def get_stats_sources_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(InlineKeyboardButton("📊 جميع المصادر", callback_data="stats_source_all"))
     for index, source in enumerate(sources_list):
         kb.insert(InlineKeyboardButton(f"📱 {source}", callback_data=f"stats_source_{index}"))
     return kb
@@ -1595,137 +1596,7 @@ async def _apply_edited_field(order_id: int, field_name: str, new_value: str) ->
     save_runtime_state()
     return True
 
-def _stats_matches_date(order_info: dict, target_date) -> bool:
-    return _order_created_date(order_info) == target_date
 
-def _stats_matches_range(order_info: dict, start_date, end_date, source: str = None) -> bool:
-    order_date = _order_created_date(order_info)
-    if not order_date or order_date < start_date or order_date > end_date:
-        return False
-    if source is None:
-        return True
-    return (order_info.get("data", {}) or {}).get("source") == source
-
-def _classify_order_for_stats(data: dict) -> str:
-    pieces = data.get("pieces", []) or []
-    order_type = data.get("order_type", "")
-
-    if "شفقة" in pieces:
-        return "shafa"
-    if "سيت6" in pieces and order_type == "تطريز":
-        return "set6_tatreez"
-    if "سيت3" in pieces and order_type == "تطريز":
-        return "set3_tatreez"
-    if "سيت6" in pieces and order_type == "طباعة":
-        return "set6_print"
-    if "سيت3" in pieces and order_type == "طباعة":
-        return "set3_print"
-    if "سيت رياضي" in pieces:
-        return "sport"
-    return "other"
-
-def _count_orders_for_date(target_date) -> dict:
-    counts = {
-        "total": 0,
-        "shafa": 0,
-        "set6_tatreez": 0,
-        "set3_tatreez": 0,
-        "set6_print": 0,
-        "set3_print": 0,
-        "sport": 0,
-        "other": 0,
-        "sources": {source: 0 for source in sources_list},
-        "other_sources": {}
-    }
-
-    for order_info in orders_data.values():
-        if not _stats_matches_date(order_info, target_date):
-            continue
-
-        data = order_info.get("data", {}) or {}
-        counts["total"] += 1
-
-        source = data.get("source") or "غير محدد"
-        if source in counts["sources"]:
-            counts["sources"][source] += 1
-        else:
-            counts["other_sources"][source] = counts["other_sources"].get(source, 0) + 1
-
-        bucket = _classify_order_for_stats(data)
-        counts[bucket] += 1
-
-    return counts
-
-def _count_orders_for_range(start_date, end_date, source: str = None) -> dict:
-    counts = {
-        "total": 0,
-        "shafa": 0,
-        "set6_tatreez": 0,
-        "set3_tatreez": 0,
-        "set6_print": 0,
-        "set3_print": 0,
-        "sport": 0,
-        "other": 0,
-    }
-
-    for order_info in orders_data.values():
-        if not _stats_matches_range(order_info, start_date, end_date, source=source):
-            continue
-
-        data = order_info.get("data", {}) or {}
-        counts["total"] += 1
-        bucket = _classify_order_for_stats(data)
-        counts[bucket] += 1
-
-    return counts
-
-def _parse_stats_period(period_key: str):
-    today = datetime.now().date()
-    if period_key == "week":
-        return today, today.replace(day=today.day) if False else None
-    if period_key == "month":
-        return today, None
-    return None, None
-
-def _format_orders_stats_for_date(target_date) -> str:
-    counts = _count_orders_for_date(target_date)
-    lines = [
-        f"📊 إحصائية الطلبات ليوم {target_date.isoformat()}",
-        f"📦 العدد الكلي: {counts['total']}",
-        f"🧣 الشفقات: {counts['shafa']}",
-        f"🧵 سيت 6 تطريز: {counts['set6_tatreez']}",
-        f"🧵 سيت 3 تطريز: {counts['set3_tatreez']}",
-        f"🖨 سيت 6 طباعة: {counts['set6_print']}",
-        f"🖨 سيت 3 طباعة: {counts['set3_print']}",
-        f"⚽ سيت رياضي: {counts['sport']}",
-        f"📦 اخرى: {counts['other']}",
-        "",
-        "📱 المصادر:"
-    ]
-
-    for source in sources_list:
-        lines.append(f"• {source}: {counts['sources'].get(source, 0)}")
-
-    for source, value in counts["other_sources"].items():
-        lines.append(f"• {source}: {value}")
-
-    return "\n".join(lines)
-
-def _format_source_stats(source: str, start_date, end_date, label: str) -> str:
-    counts = _count_orders_for_range(start_date, end_date, source=source)
-    lines = [
-        f"📊 إحصائية {source}",
-        f"📅 الفترة: {label}",
-        f"📦 العدد الكلي: {counts['total']}",
-        f"🧣 الشفقات: {counts['shafa']}",
-        f"🧵 سيت 6 تطريز: {counts['set6_tatreez']}",
-        f"🧵 سيت 3 تطريز: {counts['set3_tatreez']}",
-        f"🖨 سيت 6 طباعة: {counts['set6_print']}",
-        f"🖨 سيت 3 طباعة: {counts['set3_print']}",
-        f"⚽ سيت رياضي: {counts['sport']}",
-        f"📦 اخرى: {counts['other']}"
-    ]
-    return "\n".join(lines)
 
 # ================= HANDLERS =================
 @dp.message_handler(commands=['start'])
@@ -1936,6 +1807,41 @@ def _format_source_stats(source: str, start_date, end_date, label: str) -> str:
     ])
 
 
+def _format_all_sources_stats(start_date, end_date, label: str) -> str:
+    """إحصائية جميع المصادر مجتمعة مع تفصيل لكل مصدر"""
+    counts = _count_orders_for_range(start_date, end_date, source=None)
+    lines = [
+        f"📊 إحصائية جميع المصادر",
+        f"📅 الفترة: {label}",
+        f"📦 العدد الكلي: {counts['total']}",
+        f"🧣 الشفقات: {counts['shafa']}",
+        f"🧵 سيت 6 تطريز: {counts['set6_tatreez']}",
+        f"🧵 سيت 3 تطريز: {counts['set3_tatreez']}",
+        f"🖨 سيت 3 طباعة: {counts['set3_print']}",
+        f"🖨 سيت 6 طباعة: {counts['set6_print']}",
+        f"⚽ سيت رياضي: {counts['sport']}",
+        f"📦 اخرى: {counts['other']}",
+        "",
+        "📱 تفصيل المصادر:"
+    ]
+    for source in sources_list:
+        src_counts = _count_orders_for_range(start_date, end_date, source=source)
+        if src_counts['total'] > 0:
+            lines.append(f"• {source}: {src_counts['total']}")
+    # مصادر أخرى غير موجودة في القائمة
+    other_total = 0
+    for order_info in orders_data.values():
+        order_date = _order_created_date(order_info)
+        if not order_date or order_date < start_date or order_date > end_date:
+            continue
+        data = order_info.get("data", {}) or {}
+        src = data.get("source") or "غير محدد"
+        if src not in sources_list:
+            other_total += 1
+    if other_total > 0:
+        lines.append(f"• مصادر أخرى: {other_total}")
+    return "\n".join(lines)
+
 def _range_for_period(period_key: str):
     today = datetime.now().date()
     if period_key == "week":
@@ -1974,14 +1880,18 @@ async def cmd_stats(msg: types.Message, state: FSMContext):
 
 @dp.callback_query_handler(lambda c: c.data.startswith("stats_source_"), state=StatsState.waiting_for_source)
 async def process_stats_source(call: types.CallbackQuery, state: FSMContext):
-    try:
-        source_index = int(call.data.replace("stats_source_", ""))
-        source = sources_list[source_index]
-    except Exception:
-        await call.answer("❌ مصدر غير صحيح", show_alert=True)
-        return
+    raw = call.data.replace("stats_source_", "")
+    if raw == "all":
+        source = None
+    else:
+        try:
+            source_index = int(raw)
+            source = sources_list[source_index]
+        except Exception:
+            await call.answer("❌ مصدر غير صحيح", show_alert=True)
+            return
 
-    await state.update_data(stats_source=source)
+    await state.update_data(stats_source=source, stats_all_sources=(source is None))
     await call.answer()
     await call.message.answer("📆 اختر الفترة:", reply_markup=get_stats_period_kb())
     await StatsState.waiting_for_period.set()
@@ -1992,7 +1902,9 @@ async def process_stats_period(call: types.CallbackQuery, state: FSMContext):
     period_key = call.data.replace("stats_period_", "")
     data = await state.get_data()
     source = data.get("stats_source")
-    if not source:
+    is_all = data.get("stats_all_sources", False)
+
+    if not source and not is_all:
         await call.answer("❌ لم يتم تحديد المصدر", show_alert=True)
         return
 
@@ -2008,7 +1920,10 @@ async def process_stats_period(call: types.CallbackQuery, state: FSMContext):
         return
 
     await call.answer()
-    await call.message.answer(_format_source_stats(source, start_date, end_date, label))
+    if is_all:
+        await call.message.answer(_format_all_sources_stats(start_date, end_date, label))
+    else:
+        await call.message.answer(_format_source_stats(source, start_date, end_date, label))
     await state.finish()
 
 
@@ -2021,12 +1936,17 @@ async def process_stats_manual_date(msg: types.Message, state: FSMContext):
 
     data = await state.get_data()
     source = data.get("stats_source")
-    if not source:
+    is_all = data.get("stats_all_sources", False)
+
+    if not source and not is_all:
         await msg.answer("❌ لم يتم تحديد المصدر.")
         await state.finish()
         return
 
-    await msg.answer(_format_source_stats(source, target_date, target_date, target_date.isoformat()))
+    if is_all:
+        await msg.answer(_format_all_sources_stats(target_date, target_date, target_date.isoformat()))
+    else:
+        await msg.answer(_format_source_stats(source, target_date, target_date, target_date.isoformat()))
     await state.finish()
 
 def _is_forwarded_message(msg: types.Message) -> bool:
@@ -2365,7 +2285,7 @@ async def process_urgent_note(msg: types.Message, state: FSMContext):
 
     await state.finish()
 
-@dp.callback_query_handler(lambda c: c.data.startswith("mark_urgent_"))
+@dp.callback_query_handler(lambda c: c.data.startswith("mark_urgent_"), state='*')
 async def mark_order_urgent(call: types.CallbackQuery, state: FSMContext):
     try:
         parts = call.data.split("_")
@@ -2377,8 +2297,8 @@ async def mark_order_urgent(call: types.CallbackQuery, state: FSMContext):
 
         await call.answer("⏳ جاري نقل الطلب...", show_alert=False)
 
+        await state.finish()
         await state.update_data(urgent_order_id=order_id)
-        await call.answer()
         await call.message.answer("📝 اكتب ملاحظة المستعجل لهذا الطلب:")
         await OrderState.urgent_note.set()
     except Exception as e:
@@ -2793,7 +2713,7 @@ async def _finalize_order(msg: types.Message, state: FSMContext):
         await state.finish()
 
 # ================= EDIT HANDLERS =================
-@dp.callback_query_handler(lambda c: c.data.startswith("edit_"))
+@dp.callback_query_handler(lambda c: c.data.startswith("edit_"), state='*')
 async def edit_order_start(call: types.CallbackQuery, state: FSMContext):
     """بدء التعديل"""
     try:
@@ -2804,6 +2724,7 @@ async def edit_order_start(call: types.CallbackQuery, state: FSMContext):
                 await call.answer("❌ لم أجد الطلب!", show_alert=True)
                 return
         
+        await state.finish()
         await state.update_data(edit_order_id=order_id)
         await call.message.answer(
             f"📝 اختر ما تريد تعديله في الطلب #{order_id}:",
@@ -3148,8 +3069,8 @@ async def _move_order_to_status(order_id: int, destination_status: str) -> bool:
     return True
 
 # ================= MOVE ORDER HANDLER =================
-@dp.callback_query_handler(lambda c: c.data.startswith("move_"))
-async def move_order(call: types.CallbackQuery):
+@dp.callback_query_handler(lambda c: c.data.startswith("move_"), state='*')
+async def move_order(call: types.CallbackQuery, state: FSMContext):
     try:
         parts = call.data.split("_")
         order_id = int(parts[1])
@@ -3168,6 +3089,7 @@ async def move_order(call: types.CallbackQuery):
             await call.answer("🔔 موجود هنا!", show_alert=True)
             return
 
+        await state.finish()
         await call.answer("⏳ جاري نقل الطلب...", show_alert=False)
         await _transfer_order_to_status(order_id, destination_status)
 
@@ -3178,7 +3100,7 @@ async def move_order(call: types.CallbackQuery):
         except Exception:
             pass
 
-@dp.callback_query_handler(lambda c: c.data == "clear_ready_export")
+@dp.callback_query_handler(lambda c: c.data == "clear_ready_export", state='*')
 async def clear_ready_export(call: types.CallbackQuery):
     ready_now = [oid for oid in orders_data if is_order_active_in_status(oid, "ready")]
     if not ready_now:
