@@ -1486,32 +1486,47 @@ def get_edit_options_kb(order_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton("🧵 نوع الطلب", callback_data=f"field_order_type_{order_id}"),
     ]
 
-    if order_data.get("team") or order_data.get("sport_number") or order_data.get("sport_weight") or order_data.get("size"):
+    pieces = order_data.get("pieces", [])
+    
+    # تحديد الاحتياجات بناءً على قطع الطلب أو وجود بيانات فعلية في الحقول
+    need_sport = "سيت رياضي" in pieces or bool(order_data.get("team") or order_data.get("sport_number") or order_data.get("sport_weight"))
+    need_over = any(p in pieces for p in ["أوفر", "سيت6", "سيت3"]) or bool(order_data.get("over_type") or order_data.get("over_kind"))
+    need_hand = any(p in pieces for p in ["ملحف", "سيت6"]) or bool(order_data.get("hand_type"))
+    need_scarf = "وشاح" in pieces or bool(order_data.get("scarf_owner"))
+    need_shafa = "شفقة" in pieces or bool(order_data.get("shafa_color"))
+    
+    if need_sport:
         buttons.extend([
             InlineKeyboardButton("⚽ الفريق", callback_data=f"field_team_{order_id}"),
             InlineKeyboardButton("🔢 الرقم", callback_data=f"field_sport_number_{order_id}"),
             InlineKeyboardButton("⚖️ وزن الطفل", callback_data=f"field_sport_weight_{order_id}"),
-            InlineKeyboardButton("📏 العمر/القياس", callback_data=f"field_size_{order_id}"),
         ])
+        
+    if need_sport or need_over or bool(order_data.get("size")):
+        buttons.append(InlineKeyboardButton("📏 العمر/القياس", callback_data=f"field_size_{order_id}"))
 
-    if order_data.get("over_type"):
+    if need_over:
+        # خيار نوع الأوفر التفصيلي تم دمجه داخل نوع الأوفر الرئيسي
         buttons.append(InlineKeyboardButton("✨ نوع الأوفر", callback_data=f"field_over_type_{order_id}"))
-    if order_data.get("over_kind"):
-        buttons.append(InlineKeyboardButton("🎀 نوع الأوفر التفصيلي", callback_data=f"field_over_kind_{order_id}"))
-    if order_data.get("hand_type"):
+
+    if need_hand:
         buttons.append(InlineKeyboardButton("🛏 نوع الملحف", callback_data=f"field_hand_type_{order_id}"))
-    if order_data.get("scarf_owner"):
+
+    if need_scarf:
         buttons.append(InlineKeyboardButton("🧣 صاحب الوشاح", callback_data=f"field_scarf_owner_{order_id}"))
-    if order_data.get("shafa_color"):
+
+    if need_shafa:
         buttons.append(InlineKeyboardButton("🌈 لون الشفقة", callback_data=f"field_shafa_color_{order_id}"))
-    if order_data.get("box_color"):
-        buttons.append(InlineKeyboardButton("🎁 لون البوكس", callback_data=f"field_box_color_{order_id}"))
-    if order_data.get("box_wood_name"):
-        buttons.append(InlineKeyboardButton("🪵 اسم الخشب", callback_data=f"field_box_wood_name_{order_id}"))
-    if order_data.get("dist_count"):
-        buttons.append(InlineKeyboardButton("🎉 عدد التوزيعات", callback_data=f"field_dist_count_{order_id}"))
-    if order_data.get("dist_color"):
-        buttons.append(InlineKeyboardButton("🎨 لون التوزيعات", callback_data=f"field_dist_color_{order_id}"))
+
+    if order_data.get("box_color") or order_data.get("dist_count") or order_data.get("dist_color") or "توزيعات" in pieces:
+        if order_data.get("box_color") or "توزيعات" in pieces:
+            buttons.append(InlineKeyboardButton("🎁 لون البوكس", callback_data=f"field_box_color_{order_id}"))
+        if order_data.get("box_wood_name"):
+            buttons.append(InlineKeyboardButton("🪵 اسم الخشب", callback_data=f"field_box_wood_name_{order_id}"))
+        if order_data.get("dist_count") or "توزيعات" in pieces:
+            buttons.append(InlineKeyboardButton("🎉 عدد التوزيعات", callback_data=f"field_dist_count_{order_id}"))
+        if order_data.get("dist_color") or "توزيعات" in pieces:
+            buttons.append(InlineKeyboardButton("🎨 لون التوزيعات", callback_data=f"field_dist_color_{order_id}"))
 
     buttons.extend([
         InlineKeyboardButton("💰 السعر", callback_data=f"field_price_{order_id}"),
@@ -1521,6 +1536,31 @@ def get_edit_options_kb(order_id: int) -> InlineKeyboardMarkup:
 
     kb.add(*buttons)
     return kb
+
+async def _cleanup_edit_messages(chat_id: int, state: FSMContext, user_msg_id: int = None):
+    """حذف رسائل التعديل والمدخلات لإبقاء المحادثة نظيفة"""
+    try:
+        state_data = await state.get_data()
+        msg_a_id = state_data.get("edit_msg_a_id")
+        msg_b_id = state_data.get("edit_msg_b_id")
+        
+        if msg_a_id:
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=msg_a_id)
+            except Exception:
+                pass
+        if msg_b_id:
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=msg_b_id)
+            except Exception:
+                pass
+        if user_msg_id:
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=user_msg_id)
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"⚠️ خطأ أثناء تنظيف رسائل التعديل: {e}")
 
 def _edit_field_keyboard(field_name: str) -> InlineKeyboardMarkup | None:
     if field_name == "source":
@@ -2725,11 +2765,11 @@ async def edit_order_start(call: types.CallbackQuery, state: FSMContext):
                 return
         
         await state.finish()
-        await state.update_data(edit_order_id=order_id)
-        await call.message.answer(
+        msg_a = await call.message.answer(
             f"📝 اختر ما تريد تعديله في الطلب #{order_id}:",
             reply_markup=get_edit_options_kb(order_id)
         )
+        await state.update_data(edit_order_id=order_id, edit_msg_a_id=msg_a.message_id)
         await EditOrderState.waiting_for_field_choice.set()
     except Exception as e:
         print(f"❌ خطأ في edit_order_start: {e}")
@@ -2770,9 +2810,10 @@ async def choose_field(call: types.CallbackQuery, state: FSMContext):
         await state.update_data(edit_order_id=order_id, edit_field=field_name)
         field_kb = _edit_field_keyboard(field_name)
         if field_kb:
-            await call.message.answer(f"✏️ اختر القيمة الجديدة للـ {field_display.get(field_name, field_name)}:", reply_markup=field_kb)
+            msg_b = await call.message.answer(f"✏️ اختر القيمة الجديدة للـ {field_display.get(field_name, field_name)}:", reply_markup=field_kb)
         else:
-            await call.message.answer(f"✏️ اكتب القيمة الجديدة للـ {field_display.get(field_name, field_name)}:")
+            msg_b = await call.message.answer(f"✏️ اكتب القيمة الجديدة للـ {field_display.get(field_name, field_name)}:")
+        await state.update_data(edit_msg_b_id=msg_b.message_id)
         await EditOrderState.editing_field.set()
     except Exception as e:
         print(f"❌ خطأ في choose_field: {e}")
@@ -2783,9 +2824,11 @@ async def choose_field(call: types.CallbackQuery, state: FSMContext):
 async def edit_source_choice(call: types.CallbackQuery, state: FSMContext):
     source = call.data.replace("source_", "")
     data = await state.get_data()
+    order_id = data.get("edit_order_id")
     await call.answer()
-    if await _apply_edited_field(data.get("edit_order_id"), data.get("edit_field"), source):
-        await call.message.answer("✅ تم تحديث المصدر.")
+    if await _apply_edited_field(order_id, data.get("edit_field"), source):
+        await _cleanup_edit_messages(call.message.chat.id, state)
+        await call.message.answer(f"✅ تم تعديل الطلب #{order_id} بنجاح!")
         await state.finish()
 
 
@@ -2793,9 +2836,11 @@ async def edit_source_choice(call: types.CallbackQuery, state: FSMContext):
 async def edit_city_choice(call: types.CallbackQuery, state: FSMContext):
     city = call.data.replace("city_", "")
     data = await state.get_data()
+    order_id = data.get("edit_order_id")
     await call.answer()
-    if await _apply_edited_field(data.get("edit_order_id"), data.get("edit_field"), city):
-        await call.message.answer("✅ تم تحديث المحافظة.")
+    if await _apply_edited_field(order_id, data.get("edit_field"), city):
+        await _cleanup_edit_messages(call.message.chat.id, state)
+        await call.message.answer(f"✅ تم تعديل الطلب #{order_id} بنجاح!")
         await state.finish()
 
 
@@ -2803,9 +2848,11 @@ async def edit_city_choice(call: types.CallbackQuery, state: FSMContext):
 async def edit_order_type_choice(call: types.CallbackQuery, state: FSMContext):
     order_type = "طباعة" if call.data == "type_print" else "تطريز"
     data = await state.get_data()
+    order_id = data.get("edit_order_id")
     await call.answer()
-    if await _apply_edited_field(data.get("edit_order_id"), data.get("edit_field"), order_type):
-        await call.message.answer("✅ تم تحديث نوع الطلب.")
+    if await _apply_edited_field(order_id, data.get("edit_field"), order_type):
+        await _cleanup_edit_messages(call.message.chat.id, state)
+        await call.message.answer(f"✅ تم تعديل الطلب #{order_id} بنجاح!")
         await state.finish()
 
 
@@ -2813,75 +2860,95 @@ async def edit_order_type_choice(call: types.CallbackQuery, state: FSMContext):
 async def edit_team_choice(call: types.CallbackQuery, state: FSMContext):
     team_value = call.data.replace("team_", "")
     data = await state.get_data()
+    order_id = data.get("edit_order_id")
     if team_value == "other":
         await call.answer()
-        await state.update_data(edit_waiting_custom_field="team")
-        await call.message.answer("✍️ اكتب اسم الفريق الجديد:")
+        try:
+            await bot.delete_message(call.message.chat.id, call.message.message_id)
+        except Exception:
+            pass
+        msg_b2 = await call.message.answer("✍️ اكتب اسم الفريق الجديد:")
+        await state.update_data(edit_waiting_custom_field="team", edit_msg_b_id=msg_b2.message_id)
         return
     await call.answer()
-    if await _apply_edited_field(data.get("edit_order_id"), data.get("edit_field"), team_value):
-        await call.message.answer("✅ تم تحديث الفريق.")
+    if await _apply_edited_field(order_id, data.get("edit_field"), team_value):
+        await _cleanup_edit_messages(call.message.chat.id, state)
+        await call.message.answer(f"✅ تم تعديل الطلب #{order_id} بنجاح!")
         await state.finish()
 
 
 @dp.callback_query_handler(lambda c: c.data.startswith("over_") and not c.data.startswith("over_kind_"), state=EditOrderState.editing_field)
 async def edit_over_choice(call: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    field_name = data.get("edit_field")
+    order_id = data.get("edit_order_id")
     value = call.data.replace("over_", "")
     await call.answer()
-    if await _apply_edited_field(data.get("edit_order_id"), field_name, value):
-        await call.message.answer("✅ تم تحديث نوع الأوفر.")
-        await state.finish()
+    if await _apply_edited_field(order_id, "over_type", value):
+        try:
+            await bot.delete_message(chat_id=call.message.chat.id, message_id=call.message.message_id)
+        except Exception:
+            pass
+        msg_b2 = await call.message.answer("🎀 اختر نوع الأوفر التفصيلي (نوع الردن):", reply_markup=get_over_kind_kb())
+        await state.update_data(edit_msg_b_id=msg_b2.message_id)
 
 
 @dp.callback_query_handler(lambda c: c.data.startswith("over_kind_"), state=EditOrderState.editing_field)
 async def edit_over_kind_choice(call: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
+    order_id = data.get("edit_order_id")
     value = call.data.replace("over_kind_", "")
     await call.answer()
-    if await _apply_edited_field(data.get("edit_order_id"), data.get("edit_field"), value):
-        await call.message.answer("✅ تم تحديث نوع الأوفر التفصيلي.")
+    if await _apply_edited_field(order_id, "over_kind", value):
+        await _cleanup_edit_messages(call.message.chat.id, state)
+        await call.message.answer(f"✅ تم تعديل الطلب #{order_id} بنجاح!")
         await state.finish()
 
 
 @dp.callback_query_handler(lambda c: c.data.startswith("hand_"), state=EditOrderState.editing_field)
 async def edit_hand_choice(call: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
+    order_id = data.get("edit_order_id")
     value = call.data.replace("hand_", "")
     await call.answer()
-    if await _apply_edited_field(data.get("edit_order_id"), data.get("edit_field"), value):
-        await call.message.answer("✅ تم تحديث نوع الملحف.")
+    if await _apply_edited_field(order_id, data.get("edit_field"), value):
+        await _cleanup_edit_messages(call.message.chat.id, state)
+        await call.message.answer(f"✅ تم تعديل الطلب #{order_id} بنجاح!")
         await state.finish()
 
 
 @dp.callback_query_handler(lambda c: c.data.startswith("scarf_"), state=EditOrderState.editing_field)
 async def edit_scarf_choice(call: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
+    order_id = data.get("edit_order_id")
     value = call.data.replace("scarf_", "")
     await call.answer()
-    if await _apply_edited_field(data.get("edit_order_id"), data.get("edit_field"), value):
-        await call.message.answer("✅ تم تحديث صاحب الوشاح.")
+    if await _apply_edited_field(order_id, data.get("edit_field"), value):
+        await _cleanup_edit_messages(call.message.chat.id, state)
+        await call.message.answer(f"✅ تم تعديل الطلب #{order_id} بنجاح!")
         await state.finish()
 
 
 @dp.callback_query_handler(lambda c: c.data.startswith("box_"), state=EditOrderState.editing_field)
 async def edit_box_choice(call: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
+    order_id = data.get("edit_order_id")
     value = call.data.replace("box_", "")
     await call.answer()
-    if await _apply_edited_field(data.get("edit_order_id"), data.get("edit_field"), value):
-        await call.message.answer("✅ تم تحديث لون البوكس.")
+    if await _apply_edited_field(order_id, data.get("edit_field"), value):
+        await _cleanup_edit_messages(call.message.chat.id, state)
+        await call.message.answer(f"✅ تم تعديل الطلب #{order_id} بنجاح!")
         await state.finish()
 
 
 @dp.callback_query_handler(lambda c: c.data.startswith("size_"), state=EditOrderState.editing_field)
 async def edit_size_choice(call: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
+    order_id = data.get("edit_order_id")
     value = call.data.replace("size_", "")
     await call.answer()
-    if await _apply_edited_field(data.get("edit_order_id"), data.get("edit_field"), value):
-        await call.message.answer("✅ تم تحديث العمر/القياس.")
+    if await _apply_edited_field(order_id, data.get("edit_field"), value):
+        await _cleanup_edit_messages(call.message.chat.id, state)
+        await call.message.answer(f"✅ تم تعديل الطلب #{order_id} بنجاح!")
         await state.finish()
 
 @dp.message_handler(state=EditOrderState.editing_field)
@@ -2955,6 +3022,7 @@ async def save_edited_field(msg: types.Message, state: FSMContext):
         save_to_excel(orders_data[order_id]["data"], ORDERS_FILE)
         save_runtime_state()
         
+        await _cleanup_edit_messages(msg.chat.id, state, user_msg_id=msg.message_id)
         await msg.answer(f"✅ تم تعديل الطلب #{order_id} بنجاح!")
         print(f"✅✅ انتهى التعديل بنجاح")
         await state.finish()
@@ -2967,13 +3035,10 @@ async def save_edited_field(msg: types.Message, state: FSMContext):
 async def cancel_edit(call: types.CallbackQuery, state: FSMContext):
     """إلغاء التعديل"""
     try:
+        await _cleanup_edit_messages(call.message.chat.id, state)
         await state.finish()
-        try:
-            await call.message.edit_reply_markup(reply_markup=None)
-        except Exception:
-            pass
         await call.answer("❌ تم إلغاء التعديل", show_alert=False)
-        await call.message.answer("✅ تم إلغاء التعديل")
+        await call.message.answer("❌ تم إلغاء التعديل")
     except Exception as e:
         print(f"❌ خطأ: {e}")
 
